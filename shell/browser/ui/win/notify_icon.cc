@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "base/strings/string_util_win.h"
 #include "base/strings/utf_string_conversions.h"
+#include "shell/browser/ui/electron_menu_model.h"
 #include "shell/browser/ui/win/notify_icon_host.h"
 #include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/display/screen.h"
@@ -77,34 +78,33 @@ void NotifyIcon::HandleClickEvent(int modifiers,
     if (double_button_click)  // double left click
       NotifyDoubleClicked(bounds, modifiers);
     else  // single left click
-      NotifyClicked(bounds,
-                    display::Screen::GetScreen()->GetCursorScreenPoint(),
+      NotifyClicked(bounds, display::Screen::Get()->GetCursorScreenPoint(),
                     modifiers);
     return;
   } else if (middle_button_click) {  // single middle click
     NotifyMiddleClicked(bounds, modifiers);
   } else if (!double_button_click) {  // single right click
     if (menu_model_)
-      PopUpContextMenu(gfx::Point(), menu_model_->GetWeakPtr());
+      PopUpContextMenu(gfx::Point(), menu_model_->GetWeakPtr(), {});
     else
       NotifyRightClicked(bounds, modifiers);
   }
 }
 
 void NotifyIcon::HandleMouseMoveEvent(int modifiers) {
-  gfx::Point cursorPos = display::Screen::GetScreen()->GetCursorScreenPoint();
+  gfx::Point cursorPos = display::Screen::Get()->GetCursorScreenPoint();
   // Omit event fired when tray icon is created but cursor is outside of it.
   if (GetBounds().Contains(cursorPos))
     NotifyMouseMoved(cursorPos, modifiers);
 }
 
 void NotifyIcon::HandleMouseEntered(int modifiers) {
-  gfx::Point cursor_pos = display::Screen::GetScreen()->GetCursorScreenPoint();
+  gfx::Point cursor_pos = display::Screen::Get()->GetCursorScreenPoint();
   NotifyMouseEntered(cursor_pos, modifiers);
 }
 
 void NotifyIcon::HandleMouseExited(int modifiers) {
-  gfx::Point cursor_pos = display::Screen::GetScreen()->GetCursorScreenPoint();
+  gfx::Point cursor_pos = display::Screen::Get()->GetCursorScreenPoint();
   NotifyMouseExited(cursor_pos, modifiers);
 }
 
@@ -209,7 +209,8 @@ void NotifyIcon::Focus() {
 }
 
 void NotifyIcon::PopUpContextMenu(const gfx::Point& pos,
-                                  base::WeakPtr<ElectronMenuModel> menu_model) {
+                                  base::WeakPtr<ElectronMenuModel> menu_model,
+                                  base::ScopedClosureRunner retain_menu) {
   // Returns if context menu isn't set.
   if (menu_model == nullptr && menu_model_ == nullptr)
     return;
@@ -225,12 +226,14 @@ void NotifyIcon::PopUpContextMenu(const gfx::Point& pos,
   // Show menu at mouse's position by default.
   gfx::Rect rect(pos, gfx::Size());
   if (pos.IsOrigin())
-    rect.set_origin(display::Screen::GetScreen()->GetCursorScreenPoint());
+    rect.set_origin(display::Screen::Get()->GetCursorScreenPoint());
 
   if (menu_model) {
+    popup_menu_retain_ = std::move(retain_menu);
     menu_runner_ = std::make_unique<views::MenuRunner>(
         menu_model.get(), views::MenuRunner::HAS_MNEMONICS);
   } else {
+    popup_menu_retain_.RunAndReset();
     menu_runner_ = std::make_unique<views::MenuRunner>(
         menu_model_, views::MenuRunner::HAS_MNEMONICS);
   }

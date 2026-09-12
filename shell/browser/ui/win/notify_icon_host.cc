@@ -120,8 +120,7 @@ class NotifyIconHost::MouseEnteredExitedDetector {
   }
 
   bool IsCursorOverIcon(raw_ptr<NotifyIcon> icon) {
-    gfx::Point cursor_pos =
-        display::Screen::GetScreen()->GetCursorScreenPoint();
+    gfx::Point cursor_pos = display::Screen::Get()->GetCursorScreenPoint();
     return icon->GetBounds().Contains(cursor_pos);
   }
 
@@ -170,8 +169,8 @@ NotifyIconHost::NotifyIconHost() {
   // create a hidden WS_POPUP window instead of an HWND_MESSAGE window, because
   // only top-level windows such as popups can receive broadcast messages like
   // "TaskbarCreated".
-  window_ = CreateWindow(MAKEINTATOM(atom_), 0, WS_POPUP, 0, 0, 0, 0, 0, 0,
-                         instance_, 0);
+  window_ = CreateWindow(MAKEINTATOM(atom_), nullptr, WS_POPUP, 0, 0, 0, 0,
+                         nullptr, nullptr, instance_, nullptr);
   gfx::CheckWindowCreated(window_, ::GetLastError());
   gfx::SetWindowUserData(window_, this);
 
@@ -190,21 +189,30 @@ NotifyIconHost::~NotifyIconHost() {
     delete ptr;
 }
 
-NotifyIcon* NotifyIconHost::CreateNotifyIcon(std::optional<UUID> guid) {
-  if (guid.has_value()) {
-    for (NotifyIcons::const_iterator i(notify_icons_.begin());
-         i != notify_icons_.end(); ++i) {
-      auto* current_win_icon = static_cast<NotifyIcon*>(*i);
-      if (current_win_icon->guid() == guid.value()) {
-        LOG(WARNING)
-            << "Guid already in use. Existing tray entry will be replaced.";
+NotifyIcon* NotifyIconHost::CreateNotifyIcon(std::optional<base::Uuid> guid) {
+  std::string guid_str =
+      guid.has_value() ? guid.value().AsLowercaseString() : "";
+  UUID uid = GUID_NULL;
+  if (!guid_str.empty()) {
+    if (guid_str[0] == '{' && guid_str[guid_str.length() - 1] == '}') {
+      guid_str = guid_str.substr(1, guid_str.length() - 2);
+    }
+
+    auto* uid_cstr = reinterpret_cast<unsigned char*>(guid_str.data());
+    RPC_STATUS result = UuidFromStringA(uid_cstr, &uid);
+    if (result != RPC_S_INVALID_STRING_UUID) {
+      for (const NotifyIcon* current_win_icon : notify_icons_) {
+        if (current_win_icon->guid() == uid) {
+          LOG(WARNING)
+              << "Guid already in use. Existing tray entry will be replaced.";
+        }
       }
     }
   }
 
   auto* notify_icon =
       new NotifyIcon(this, NextIconId(), window_, kNotifyIconMessage,
-                     guid.has_value() ? guid.value() : GUID_DEFAULT);
+                     uid == GUID_NULL ? GUID_DEFAULT : uid);
 
   notify_icons_.push_back(notify_icon);
   return notify_icon;
@@ -246,9 +254,7 @@ LRESULT CALLBACK NotifyIconHost::WndProc(HWND hwnd,
     NotifyIcon* win_icon = nullptr;
 
     // Find the selected status icon.
-    for (NotifyIcons::const_iterator i(notify_icons_.begin());
-         i != notify_icons_.end(); ++i) {
-      auto* current_win_icon = static_cast<NotifyIcon*>(*i);
+    for (NotifyIcon* current_win_icon : notify_icons_) {
       if (current_win_icon->icon_id() == wparam) {
         win_icon = current_win_icon;
         break;

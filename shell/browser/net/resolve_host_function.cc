@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "base/functional/bind.h"
-#include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/storage_partition.h"
 #include "net/base/address_list.h"
@@ -54,8 +53,8 @@ void ResolveHostFunction::Run() {
   receiver_.set_disconnect_handler(base::BindOnce(
       &ResolveHostFunction::OnComplete, this, net::ERR_NAME_NOT_RESOLVED,
       net::ResolveErrorInfo(net::ERR_FAILED),
-      /*resolved_addresses=*/std::nullopt,
-      /*endpoint_results_with_metadata=*/std::nullopt));
+      /*resolved_addresses=*/net::AddressList(),
+      /*endpoint_results_with_metadata=*/net::HostResolverEndpointResults()));
   if (electron::IsUtilityProcess()) {
     URLLoaderBundle::GetInstance()->GetHostResolver()->ResolveHost(
         network::mojom::HostResolverHost::NewHostPortPair(
@@ -76,9 +75,8 @@ void ResolveHostFunction::Run() {
 void ResolveHostFunction::OnComplete(
     int result,
     const net::ResolveErrorInfo& resolve_error_info,
-    const std::optional<net::AddressList>& resolved_addresses,
-    const std::optional<net::HostResolverEndpointResults>&
-        endpoint_results_with_metadata) {
+    const net::AddressList& resolved_addresses,
+    const net::HostResolverEndpointResults& endpoint_results_with_metadata) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   // Ensure that we outlive the `receiver_.reset()` call.

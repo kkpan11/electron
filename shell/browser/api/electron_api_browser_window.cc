@@ -4,19 +4,20 @@
 
 #include "shell/browser/api/electron_api_browser_window.h"
 
-#include "content/browser/renderer_host/render_widget_host_owner_delegate.h"  // nogncheck
-#include "content/browser/web_contents/web_contents_impl.h"  // nogncheck
-#include "content/public/browser/render_process_host.h"
+#include "base/containers/fixed_flat_set.h"
 #include "content/public/browser/render_view_host.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "shell/browser/api/electron_api_web_contents_view.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/native_window.h"
+#include "shell/browser/ui/inspectable_web_contents_view.h"
 #include "shell/browser/web_contents_preferences.h"
 #include "shell/browser/window_list.h"
 #include "shell/common/color_util.h"
 #include "shell/common/gin_helper/constructor.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/options_switches.h"
@@ -64,14 +65,16 @@ BrowserWindow::BrowserWindow(gin::Arguments* args,
     web_preferences.Set(options::kShow, true);
 
   // Creates the WebContentsView.
-  gin::Handle<WebContentsView> web_contents_view =
+  gin_helper::Handle<WebContentsView> web_contents_view =
       WebContentsView::Create(isolate, web_preferences);
   DCHECK(web_contents_view.get());
   window()->AddDraggableRegionProvider(web_contents_view.get());
+  window()->InitPrimaryWebContentsView(
+      static_cast<InspectableWebContentsView*>(web_contents_view->view()));
   web_contents_view_.Reset(isolate, web_contents_view.ToV8());
 
   // Save a reference of the WebContents.
-  gin::Handle<WebContents> web_contents =
+  gin_helper::Handle<WebContents> web_contents =
       web_contents_view->GetWebContents(isolate);
   web_contents_.Reset(isolate, web_contents.ToV8());
   api_web_contents_ = web_contents->GetWeakPtr();
@@ -129,14 +132,21 @@ void BrowserWindow::OnActivateContents() {
 #endif
 }
 
-void BrowserWindow::OnPageTitleUpdated(const std::u16string& title,
-                                       bool explicit_set) {
+void BrowserWindow::OnPageTitleUpdated(
+    const std::u16string& title,
+    bool explicit_set,
+    bool from_same_document_history_navigation) {
   // Change window title to page title.
   auto self = weak_factory_.GetWeakPtr();
   if (!Emit("page-title-updated", title, explicit_set)) {
     // |this| might be deleted, or marked as destroyed by close().
-    if (self && !IsDestroyed())
-      SetTitle(base::UTF16ToUTF8(title));
+    if (self && !IsDestroyed()) {
+      if (from_same_document_history_navigation) {
+        SetTitleFromPageIfNotSetFromApi(base::UTF16ToUTF8(title));
+      } else {
+        SetTitleFromPage(base::UTF16ToUTF8(title));
+      }
+    }
   }
 }
 
@@ -201,19 +211,10 @@ void BrowserWindow::OnWindowLeaveFullScreen() {
   BaseWindow::OnWindowLeaveFullScreen();
 }
 
-void BrowserWindow::UpdateWindowControlsOverlay(
-    const gfx::Rect& bounding_rect) {
-  web_contents()->UpdateWindowControlsOverlay(bounding_rect);
-}
-
 void BrowserWindow::CloseImmediately() {
   // Close all child windows before closing current window.
-  v8::HandleScope handle_scope(isolate());
-  for (v8::Local<v8::Value> value : GetChildWindows()) {
-    gin::Handle<BrowserWindow> child;
-    if (gin::ConvertFromV8(isolate(), value, &child) && !child.IsEmpty())
-      child->window()->CloseImmediately();
-  }
+  for (BaseWindow* child : GetChildWindows())
+    child->window()->CloseImmediately();
 
   BaseWindow::CloseImmediately();
 }
@@ -234,7 +235,7 @@ void BrowserWindow::Blur() {
 
 void BrowserWindow::SetBackgroundColor(const std::string& color_name) {
   BaseWindow::SetBackgroundColor(color_name);
-  SkColor color = ParseCSSColor(color_name);
+  SkColor color = ParseCSSColor(color_name).value_or(SK_ColorWHITE);
   if (api_web_contents_) {
     api_web_contents_->SetBackgroundColor(color);
     // Also update the web preferences object otherwise the view will be reset
@@ -242,8 +243,20 @@ void BrowserWindow::SetBackgroundColor(const std::string& color_name) {
     auto* web_preferences =
         WebContentsPreferences::From(api_web_contents_->web_contents());
     if (web_preferences) {
-      web_preferences->SetBackgroundColor(ParseCSSColor(color_name));
+      web_preferences->SetBackgroundColor(color);
     }
+  }
+}
+
+void BrowserWindow::SetBackgroundMaterial(const std::string& material) {
+  BaseWindow::SetBackgroundMaterial(material);
+  static constexpr auto materialTypes =
+      base::MakeFixedFlatSet<std::string_view>({"tabbed", "mica", "acrylic"});
+
+  if (materialTypes.contains(material)) {
+    SetBackgroundColor(ToRGBAHex(SK_ColorTRANSPARENT));
+  } else if (material == "none") {
+    SetBackgroundColor(ToRGBAHex(SK_ColorWHITE));
   }
 }
 
@@ -255,11 +268,6 @@ void BrowserWindow::BlurWebView() {
   web_contents()->GetRenderViewHost()->GetWidget()->Blur();
 }
 
-bool BrowserWindow::IsWebViewFocused() {
-  auto* host_view = web_contents()->GetRenderViewHost()->GetWidget()->GetView();
-  return host_view && host_view->HasFocus();
-}
-
 v8::Local<v8::Value> BrowserWindow::GetWebContents(v8::Isolate* isolate) {
   if (web_contents_.IsEmpty())
     return v8::Null(isolate);
@@ -267,13 +275,32 @@ v8::Local<v8::Value> BrowserWindow::GetWebContents(v8::Isolate* isolate) {
 }
 
 void BrowserWindow::OnWindowShow() {
-  web_contents()->WasShown();
+  if (!web_contents_shown_) {
+    web_contents()->WasShown();
+    web_contents_shown_ = true;
+  }
   BaseWindow::OnWindowShow();
 }
 
 void BrowserWindow::OnWindowHide() {
   web_contents()->WasOccluded();
+  web_contents_shown_ = false;
   BaseWindow::OnWindowHide();
+}
+
+void BrowserWindow::Show() {
+  web_contents()->WasShown();
+  web_contents_shown_ = true;
+  BaseWindow::Show();
+}
+
+void BrowserWindow::ShowInactive() {
+  // This method doesn't make sense for modal window.
+  if (IsModal())
+    return;
+  web_contents()->WasShown();
+  web_contents_shown_ = true;
+  BaseWindow::ShowInactive();
 }
 
 // static
@@ -294,6 +321,13 @@ gin_helper::WrappableBase* BrowserWindow::New(gin_helper::ErrorThrower thrower,
     options = gin::Dictionary::CreateEmpty(args->isolate());
   }
 
+  std::string error_message;
+  if (!IsWindowNameValid(options, &error_message)) {
+    // Window name is already in use throw an error and do not create the window
+    thrower.ThrowError(error_message);
+    return nullptr;
+  }
+
   return new BrowserWindow(args, options);
 }
 
@@ -304,18 +338,18 @@ void BrowserWindow::BuildPrototype(v8::Isolate* isolate,
   gin_helper::ObjectTemplateBuilder(isolate, prototype->PrototypeTemplate())
       .SetMethod("focusOnWebView", &BrowserWindow::FocusOnWebView)
       .SetMethod("blurWebView", &BrowserWindow::BlurWebView)
-      .SetMethod("isWebViewFocused", &BrowserWindow::IsWebViewFocused)
       .SetProperty("webContents", &BrowserWindow::GetWebContents);
 }
 
 // static
 v8::Local<v8::Value> BrowserWindow::From(v8::Isolate* isolate,
                                          NativeWindow* native_window) {
-  auto* existing = TrackableObject::FromWrappedClass(isolate, native_window);
-  if (existing)
-    return existing->GetWrapper();
-  else
-    return v8::Null(isolate);
+  if (native_window != nullptr) {
+    if (auto* base = FromWeakMapID(isolate, native_window->base_window_id()))
+      return base->GetWrapper();
+  }
+
+  return v8::Null(isolate);
 }
 
 }  // namespace electron::api
@@ -328,8 +362,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.Set("BrowserWindow",
            gin_helper::CreateConstructor<BrowserWindow>(
                isolate, base::BindRepeating(&BrowserWindow::New)));

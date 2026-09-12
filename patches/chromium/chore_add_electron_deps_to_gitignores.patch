@@ -6,32 +6,30 @@ Subject: chore: add electron deps to gitignores
 Makes things like "git status" quicker when developing electron locally
 
 diff --git a/.gitignore b/.gitignore
-index 0a0f0118d5c1a5a2f3ad28b068bebb849eba7246..5ca6d03b709ef119ccd6482b2f305f8a3aeb7438 100644
+index 63b0d3675470991a21eaac11e6d127e986edf279..69fb120b9a37eb0f15268a7f992c9c867af82d21 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -217,6 +217,7 @@ vs-chromium-project.txt
+@@ -228,6 +228,7 @@ vs-chromium-project.txt
  /data
  /delegate_execute
  /device/serial/device_serial_mojo.xml
 +/electron
+ /GEMINI.md
  /google_apis/gcm/gcm.xml
  /googleurl
- /gpu/gles2_conform_test
 diff --git a/third_party/.gitignore b/third_party/.gitignore
-index ad591b3a0f2afe24d53dac76655f81790c1baa50..080d19d34659290e70f599e3d91da286013be76f 100644
+index 33637b2b240bffad50cd60fa1d993a6a6f2a327c..1df3d81793e998a3f9f239494cb25f8e77c7ce08 100644
 --- a/third_party/.gitignore
 +++ b/third_party/.gitignore
-@@ -46,7 +46,9 @@
- /directxsdk
+@@ -48,6 +48,7 @@
  /dragonbox/src
+ /disarm/src
  /edk2
 +/electron_node
  /elfutils/src
-+/engflow-reclient-configs/
  /espresso/lib/
  /eyesfree/src
- /fast_float/src
-@@ -94,6 +96,7 @@
+@@ -100,6 +101,7 @@
  /mocha
  /mockito/src
  /nacl_sdk_binaries/
@@ -39,7 +37,7 @@ index ad591b3a0f2afe24d53dac76655f81790c1baa50..080d19d34659290e70f599e3d91da286
  /ninja
  /node/*.tar.gz
  /node/linux/
-@@ -138,7 +141,7 @@
+@@ -145,7 +147,7 @@
  /spirv-cross/src
  /spirv-headers/src
  /spirv-tools/src

@@ -5,21 +5,35 @@ runs:
   steps:
   - name: Install Build Tools
     shell: bash
-    run: |
+    # zizmor: ignore[adhoc-packages] the latest @electron/build-tools CLI is installed by design; it then pins depot_tools itself
+    run: | # zizmor: ignore[github-env] composite action; only run by trusted push/pull_request pipelines, paths are fixed depot_tools locations
       if [ "$(expr substr $(uname -s) 1 10)" == "MSYS_NT-10" ]; then
         git config --global core.filemode false
         git config --global core.autocrlf false
         git config --global branch.autosetuprebase always
         git config --global core.fscache true
+        git config --global core.longpaths true
         git config --global core.preloadindex true
+        git config --global core.longpaths true
       fi
-      export BUILD_TOOLS_SHA=6e8526315ea3b4828882497e532b8340e64e053c
-      npm i -g @electron/build-tools
+      export BUILD_TOOLS_SHA=6c0834d9c052463a8834b02c11a6f8b4311990f2
+      # Both fetch over the network (the first `e` command clones depot_tools),
+      # so retry them on transient failures.
+      RETRY="$PWD/src/electron/script/actions/retry.sh"
+      bash "$RETRY" npm i -g @electron/build-tools
+      # Update depot_tools to ensure python
+      bash "$RETRY" e d update_depot_tools
       e auto-update disable
+      # Disable further updates of depot_tools
       e d auto-update disable
       if [ "$(expr substr $(uname -s) 1 10)" == "MSYS_NT-10" ]; then
         e d cipd.bat --version
         cp "C:\Python311\python.exe" "C:\Python311\python3.exe"
+        # build-tools installs under the profile of whichever user the runner is
+        # (ContainerAdministrator in the container image, a per-VM user on the
+        # VM runners); USERPROFILE is what it uses and is already a Windows path.
+        echo "$USERPROFILE\.electron_build_tools\third_party\depot_tools" >> $GITHUB_PATH
+      else
+        echo "$HOME/.electron_build_tools/third_party/depot_tools" >> $GITHUB_PATH
+        echo "$HOME/.electron_build_tools/third_party/depot_tools/python-bin" >> $GITHUB_PATH
       fi
-      echo "$HOME/.electron_build_tools/third_party/depot_tools" >> $GITHUB_PATH
-      echo "$HOME/.electron_build_tools/third_party/depot_tools/python-bin" >> $GITHUB_PATH

@@ -13,9 +13,13 @@
 #import <Security/Security.h>
 
 #include "base/apple/scoped_cftyperef.h"
+#include "base/check_op.h"
 #include "base/containers/flat_map.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/no_destructor.h"
 #include "base/strings/sys_string_conversions.h"
-#include "base/task/sequenced_task_runner.h"
+#include "base/task/bind_post_task.h"
 #include "base/values.h"
 #include "chrome/browser/media/webrtc/system_media_capture_permissions_mac.h"
 #include "net/base/apple/url_conversions.h"
@@ -25,7 +29,6 @@
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/promise.h"
-#include "shell/common/node_includes.h"
 #include "shell/common/process_util.h"
 #include "skia/ext/skia_utils_mac.h"
 
@@ -80,7 +83,16 @@ namespace {
 int g_next_id = 0;
 
 // The map to convert |id| to |int|.
-base::flat_map<int, id> g_id_map;
+auto& GetIdMap() {
+  static base::NoDestructor<base::flat_map<int, id>> g_id_map;
+  return *g_id_map;
+}
+
+auto& GetKindMap() {
+  static base::NoDestructor<base::flat_map<int, NotificationCenterKind>>
+      g_kind_map;
+  return *g_kind_map;
+}
 
 AVMediaType ParseMediaType(const std::string& media_type) {
   if (media_type == "camera") {
@@ -122,10 +134,44 @@ NSNotificationCenter* GetNotificationCenter(NotificationCenterKind kind) {
   }
 }
 
+// Converts a system NSColor to an SkColor. Upstream moved this out of skia/
+// (see https://chromium-review.googlesource.com/c/chromium/src/+/8026713) into
+// a file-local helper, so replicate it here for Electron's usage.
+SkColor NSSystemColorToSkColor(NSColor* color) {
+  // It is expected that the colors that will flow through this function will be
+  // catalog colors. Being a catalog color means that it doesn't have explicit
+  // components, so convert it to a color that has components. If that resulting
+  // color can be converted, then we're done here.
+  NSColor* device_color =
+      [color colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+  if (device_color) {
+    return skia::NSDeviceColorToSkColor(device_color);
+  }
+
+  // Sometimes the conversion is not possible, but we can get an approximation
+  // by going through a CGColorRef.
+  CGColorRef cg_color = color.CGColor;
+  size_t component_count = CGColorGetNumberOfComponents(cg_color);
+
+  // 4 components means RGBA.
+  if (component_count == 4) {
+    return skia::CGColorRefToSkColor(cg_color);
+  }
+
+  // 1-2 components means a grayscale channel and maybe an alpha channel, which
+  // CGColorRefToSkColor will not like. But RGB is additive, so the conversion
+  // is easy (RGB to grayscale is less easy).
+  CHECK(component_count == 1 || component_count == 2);
+  float gray_value = *CGColorGetComponents(cg_color);
+  float alpha_value = CGColorGetAlpha(cg_color);
+
+  return SkColor4f{gray_value, gray_value, gray_value, alpha_value}.toSkColor();
+}
+
 }  // namespace
 
 void SystemPreferences::PostNotification(const std::string& name,
-                                         base::Value::Dict user_info,
+                                         base::DictValue user_info,
                                          gin::Arguments* args) {
   bool immediate = false;
   args->GetNext(&immediate);
@@ -153,7 +199,7 @@ void SystemPreferences::UnsubscribeNotification(int request_id) {
 }
 
 void SystemPreferences::PostLocalNotification(const std::string& name,
-                                              base::Value::Dict user_info) {
+                                              base::DictValue user_info) {
   NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
   [center
       postNotificationName:base::SysUTF8ToNSString(name)
@@ -174,7 +220,7 @@ void SystemPreferences::UnsubscribeLocalNotification(int request_id) {
 }
 
 void SystemPreferences::PostWorkspaceNotification(const std::string& name,
-                                                  base::Value::Dict user_info) {
+                                                  base::DictValue user_info) {
   NSNotificationCenter* center =
       [[NSWorkspace sharedWorkspace] notificationCenter];
   [center
@@ -214,7 +260,7 @@ int SystemPreferences::DoSubscribeNotification(
 
   auto* name = maybe_name->IsNull() ? nil : base::SysUTF8ToNSString(name_str);
 
-  g_id_map[request_id] = [GetNotificationCenter(kind)
+  GetIdMap()[request_id] = [GetNotificationCenter(kind)
       addObserverForName:name
                   object:nil
                    queue:nil
@@ -232,20 +278,31 @@ int SystemPreferences::DoSubscribeNotification(
                 } else {
                   copied_callback.Run(
                       base::SysNSStringToUTF8(notification.name),
-                      base::Value(base::Value::Dict()), object);
+                      base::Value(base::DictValue()), object);
                 }
               }];
+  GetKindMap()[request_id] = kind;
   return request_id;
 }
 
 void SystemPreferences::DoUnsubscribeNotification(int request_id,
                                                   NotificationCenterKind kind) {
-  auto iter = g_id_map.find(request_id);
-  if (iter != g_id_map.end()) {
+  auto iter = GetIdMap().find(request_id);
+  if (iter != GetIdMap().end()) {
     id observer = iter->second;
     [GetNotificationCenter(kind) removeObserver:observer];
-    g_id_map.erase(iter);
+    GetIdMap().erase(iter);
+    GetKindMap().erase(request_id);
   }
+}
+
+void SystemPreferences::ClearNotificationSubscriptions() {
+  for (const auto& [request_id, observer] : GetIdMap()) {
+    auto kind = GetKindMap().at(request_id);
+    [GetNotificationCenter(kind) removeObserver:observer];
+  }
+  GetIdMap().clear();
+  GetKindMap().clear();
 }
 
 v8::Local<v8::Value> SystemPreferences::GetUserDefault(
@@ -281,7 +338,7 @@ v8::Local<v8::Value> SystemPreferences::GetUserDefault(
 }
 
 void SystemPreferences::RegisterDefaults(gin::Arguments* args) {
-  base::Value::Dict dict_value;
+  base::DictValue dict_value;
 
   if (!args->GetNext(&dict_value)) {
     args->ThrowError();
@@ -363,19 +420,16 @@ void SystemPreferences::SetUserDefault(const std::string& name,
       }
     }
   } else {
-    gin_helper::ErrorThrower(args->isolate())
-        .ThrowTypeError("Invalid type: " + type);
+    args->ThrowTypeError("Invalid type: " + type);
     return;
   }
 
-  gin_helper::ErrorThrower(args->isolate())
-      .ThrowTypeError("Unable to convert value to: " + type);
+  args->ThrowTypeError("Unable to convert value to: " + type);
 }
 
 std::string SystemPreferences::GetAccentColor() {
-  NSColor* sysColor = sysColor = [NSColor controlAccentColor];
-  return ToRGBAHex(skia::NSSystemColorToSkColor(sysColor),
-                   false /* include_hash */);
+  NSColor* sysColor = [NSColor controlAccentColor];
+  return ToRGBAHex(NSSystemColorToSkColor(sysColor), false /* include_hash */);
 }
 
 std::string SystemPreferences::GetSystemColor(gin_helper::ErrorThrower thrower,
@@ -404,7 +458,7 @@ std::string SystemPreferences::GetSystemColor(gin_helper::ErrorThrower thrower,
     return "";
   }
 
-  return ToRGBAHex(skia::NSSystemColorToSkColor(sysColor));
+  return ToRGBAHex(NSSystemColorToSkColor(sysColor));
 }
 
 bool SystemPreferences::CanPromptTouchID() {
@@ -421,6 +475,17 @@ v8::Local<v8::Promise> SystemPreferences::PromptTouchID(
   gin_helper::Promise<void> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
+  if (reason.empty()) {
+    promise.RejectWithErrorMessage("reason must be non-empty");
+    return handle;
+  }
+
+  NSString* localized_reason = base::SysUTF8ToNSString(reason);
+  if (!localized_reason) {
+    promise.RejectWithErrorMessage("reason must be valid UTF-8");
+    return handle;
+  }
+
   LAContext* context = [[LAContext alloc] init];
   base::apple::ScopedCFTypeRef<SecAccessControlRef> access_control =
       base::apple::ScopedCFTypeRef<SecAccessControlRef>(
@@ -429,32 +494,28 @@ v8::Local<v8::Promise> SystemPreferences::PromptTouchID(
               kSecAccessControlPrivateKeyUsage | kSecAccessControlUserPresence,
               nullptr));
 
-  scoped_refptr<base::SequencedTaskRunner> runner =
-      base::SequencedTaskRunner::GetCurrentDefault();
-
-  __block gin_helper::Promise<void> p = std::move(promise);
+  // The reply runs on a LocalAuthentication queue; keep the cppgc-backed
+  // promise inside a UI-sequence-bound callback.
+  __block auto callback = base::BindPostTaskToCurrentDefault(base::BindOnce(
+      [](gin_helper::Promise<void> promise, bool success, std::string err_msg) {
+        if (success) {
+          promise.Resolve();
+        } else {
+          promise.RejectWithErrorMessage(err_msg);
+        }
+      },
+      std::move(promise)));
   [context
       evaluateAccessControl:access_control.get()
                   operation:LAAccessControlOperationUseKeySign
-            localizedReason:[NSString stringWithUTF8String:reason.c_str()]
+            localizedReason:localized_reason
                       reply:^(BOOL success, NSError* error) {
-                        // NOLINTBEGIN(bugprone-use-after-move)
+                        std::string err_msg;
                         if (!success) {
-                          std::string err_msg = std::string(
-                              [error.localizedDescription UTF8String]);
-                          runner->PostTask(
-                              FROM_HERE,
-                              base::BindOnce(
-                                  gin_helper::Promise<void>::RejectPromise,
-                                  std::move(p), std::move(err_msg)));
-                        } else {
-                          runner->PostTask(
-                              FROM_HERE,
-                              base::BindOnce(
-                                  gin_helper::Promise<void>::ResolvePromise,
-                                  std::move(p)));
+                          err_msg = base::SysNSStringToUTF8(
+                              error.localizedDescription);
                         }
-                        // NOLINTEND(bugprone-use-after-move)
+                        std::move(callback).Run(success, std::move(err_msg));
                       }];
 
   return handle;
@@ -539,7 +600,7 @@ std::string SystemPreferences::GetColor(gin_helper::ErrorThrower thrower,
   }
 
   if (sysColor)
-    return ToRGBAHex(skia::NSSystemColorToSkColor(sysColor));
+    return ToRGBAHex(NSSystemColorToSkColor(sysColor));
   return "";
 }
 
@@ -568,12 +629,15 @@ v8::Local<v8::Promise> SystemPreferences::AskForMediaAccess(
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
   if (auto type = ParseMediaType(media_type)) {
-    __block gin_helper::Promise<bool> p = std::move(promise);
+    // The handler runs on an arbitrary queue; keep the cppgc-backed promise
+    // inside a UI-sequence-bound callback.
+    __block auto callback = base::BindPostTaskToCurrentDefault(
+        base::BindOnce([](gin_helper::Promise<bool> promise,
+                          bool granted) { promise.Resolve(granted); },
+                       std::move(promise)));
     [AVCaptureDevice requestAccessForMediaType:type
                              completionHandler:^(BOOL granted) {
-                               dispatch_async(dispatch_get_main_queue(), ^{
-                                 p.Resolve(!!granted);
-                               });
+                               std::move(callback).Run(!!granted);
                              }];
   } else {
     promise.RejectWithErrorMessage("Invalid media type");

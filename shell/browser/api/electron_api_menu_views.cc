@@ -7,10 +7,14 @@
 #include <memory>
 #include <utility>
 
+#include "gin/persistent.h"
 #include "shell/browser/api/electron_api_base_window.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/browser/native_window_views.h"
+#include "shell/common/callback_util.h"
 #include "ui/display/screen.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 using views::MenuRunner;
 
@@ -20,6 +24,11 @@ MenuViews::MenuViews(gin::Arguments* args) : Menu(args) {}
 
 MenuViews::~MenuViews() = default;
 
+void MenuViews::Trace(cppgc::Visitor* visitor) const {
+  Menu::Trace(visitor);
+  visitor->Trace(weak_cell_factory_);
+}
+
 void MenuViews::PopupAt(BaseWindow* window,
                         std::optional<WebFrameMain*> frame,
                         int x,
@@ -27,14 +36,14 @@ void MenuViews::PopupAt(BaseWindow* window,
                         int positioning_item,
                         ui::mojom::MenuSourceType source_type,
                         base::OnceClosure callback) {
-  auto* native_window = static_cast<NativeWindowViews*>(window->window());
+  const NativeWindow* native_window = window->window();
   if (!native_window)
     return;
 
   // (-1, -1) means showing on mouse location.
   gfx::Point location;
   if (x == -1 || y == -1) {
-    location = display::Screen::GetScreen()->GetCursorScreenPoint();
+    location = display::Screen::Get()->GetCursorScreenPoint();
   } else {
     gfx::Point origin = native_window->GetContentBounds().origin();
     location = gfx::Point(origin.x() + x, origin.y() + y);
@@ -52,14 +61,26 @@ void MenuViews::PopupAt(BaseWindow* window,
   // callback, it is fine passing OnceCallback to it because we reset the
   // menu runner immediately when the menu is closed.
   int32_t window_id = window->weak_map_id();
-  auto close_callback = base::AdaptCallbackForRepeating(
-      base::BindOnce(&MenuViews::OnClosed, weak_factory_.GetWeakPtr(),
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  auto close_callback = electron::AdaptCallbackForRepeating(
+      base::BindOnce(&MenuViews::OnClosed,
+                     gin::WrapPersistent(weak_cell_factory_.GetWeakCell(
+                         isolate->GetCppHeap()->GetAllocationHandle())),
                      window_id, std::move(callback_with_ref)));
-  auto& runner = menu_runners_[window_id] =
-      std::make_unique<MenuRunner>(model(), flags, std::move(close_callback));
-  runner->RunMenuAt(native_window->widget(), nullptr,
-                    gfx::Rect{location, gfx::Size{}},
-                    views::MenuAnchorPosition::kTopLeft, source_type);
+  auto runner = std::make_unique<MenuRunner>(model(), flags, close_callback);
+  auto* const runner_ptr = runner.get();
+  menu_runners_[window_id] = std::move(runner);
+  runner_ptr->RunMenuAt(native_window->widget(), nullptr,
+                        gfx::Rect{location, gfx::Size{}},
+                        views::MenuAnchorPosition::kTopLeft, source_type);
+
+  // MenuRunner silently no-ops if another menu is active and never runs the
+  // close callback; treat that as an immediate close so nothing leaks.
+  if (auto iter = menu_runners_.find(window_id);
+      iter != menu_runners_.end() && iter->second.get() == runner_ptr &&
+      !runner_ptr->IsRunning()) {
+    close_callback.Run();
+  }
 }
 
 void MenuViews::ClosePopupAt(int32_t window_id) {
@@ -84,11 +105,12 @@ void MenuViews::OnClosed(int32_t window_id, base::OnceClosure callback) {
 }
 
 // static
-gin::Handle<Menu> Menu::New(gin::Arguments* args) {
-  auto handle = gin::CreateHandle(args->isolate(),
-                                  static_cast<Menu*>(new MenuViews(args)));
-  gin_helper::CallMethod(args->isolate(), handle.get(), "_init");
-  return handle;
+Menu* Menu::New(gin::Arguments* args) {
+  v8::Isolate* const isolate = args->isolate();
+  Menu* menu = cppgc::MakeGarbageCollected<MenuViews>(
+      isolate->GetCppHeap()->GetAllocationHandle(), args);
+  gin_helper::CallMethod(isolate, menu, "_init");
+  return menu;
 }
 
 }  // namespace electron::api

@@ -62,6 +62,15 @@ bar to reposition our app window!
 For more information around how to manage drag regions defined by your electron application,
 see the [Custom draggable regions][] section below.
 
+One more step: we should make sure our title bar content doesn't overlap with the native
+window controls. Buttons can appear on the right or left side of the frame (or both) depending
+on RTL and the user's settings. We can create a safe area using the CSS variables
+`env(titlebar-area-x, 0px)` and `env(titlebar-area-width, 100%)`.
+
+```fiddle docs/fiddles/features/window-customization/custom-title-bar/safe-area
+
+```
+
 Congratulations, you've just implemented a basic custom title bar!
 
 ## Advanced window customization
@@ -76,6 +85,7 @@ use the native UI to control the window.
 
 ```js
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow({ titleBarStyle: 'customButtonsOnHover' })
 ```
 
@@ -89,6 +99,7 @@ by a fixed amount.
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow({ titleBarStyle: 'hiddenInset' })
 ```
 
@@ -98,6 +109,7 @@ constructor.
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow({
   titleBarStyle: 'hidden',
   trafficLightPosition: { x: 10, y: 10 }
@@ -107,11 +119,12 @@ const win = new BrowserWindow({
 #### Show and hide the traffic lights programmatically _macOS_
 
 You can also show and hide the traffic lights programmatically from the main process.
-The `win.setWindowButtonVisibility` forces traffic lights to be show or hidden depending
+The `win.setWindowButtonVisibility` forces traffic lights to be shown or hidden depending
 on the value of its boolean parameter.
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow()
 // hides the traffic lights
 win.setWindowButtonVisibility(false)
@@ -149,6 +162,7 @@ default to the standard system height:
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow({
   titleBarStyle: 'hidden',
   titleBarOverlay: {

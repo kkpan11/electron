@@ -20,6 +20,12 @@ changes:
 
 Process: [Renderer](../glossary.md#renderer-process)
 
+> [!IMPORTANT]
+> If you want to call this API from a renderer process with context isolation enabled,
+> place the API call in your preload script and
+> [expose](../tutorial/context-isolation.md#after-context-isolation-enabled) it using the
+> [`contextBridge`](context-bridge.md) API.
+
 The `ipcRenderer` module is an  [EventEmitter][event-emitter]. It provides a few
 methods so you can send synchronous and asynchronous messages from the render
 process (web page) to the main process. You can also receive replies from the
@@ -53,6 +59,13 @@ for more info.
 
 ### `ipcRenderer.off(channel, listener)`
 
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/39816
+```
+-->
+
 * `channel` string
 * `listener` Function
   * `event` [IpcRendererEvent][ipc-renderer-event]
@@ -72,6 +85,13 @@ Adds a one time `listener` function for the event. This `listener` is invoked
 only the next time a message is sent to `channel`, after which it is removed.
 
 ### `ipcRenderer.addListener(channel, listener)`
+
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/39816
+```
+-->
 
 * `channel` string
 * `listener` Function
@@ -123,6 +143,13 @@ If you want to receive a single response from the main process, like the result 
 
 ### `ipcRenderer.invoke(channel, ...args)`
 
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/18449
+```
+-->
+
 * `channel` string
 * `...args` any[]
 
@@ -156,7 +183,7 @@ If you need to transfer a [`MessagePort`][] to the main process, use [`ipcRender
 
 If you do not need a response to the message, consider using [`ipcRenderer.send`](#ipcrenderersendchannel-args).
 
-> **Note**
+> [!NOTE]
 > Sending non-standard JavaScript types such as DOM objects or
 > special Electron objects will throw an exception.
 >
@@ -165,7 +192,7 @@ If you do not need a response to the message, consider using [`ipcRenderer.send`
 > Electron's IPC to the main process, as the main process would have no way to decode
 > them. Attempting to send such objects over IPC will result in an error.
 
-> **Note**
+> [!NOTE]
 > If the handler in the main process throws an error,
 > the promise returned by `invoke` will reject.
 > However, the `Error` object in the renderer process
@@ -195,12 +222,20 @@ throw an exception.
 The main process handles it by listening for `channel` with [`ipcMain`](./ipc-main.md) module,
 and replies by setting `event.returnValue`.
 
-> :warning: **WARNING**: Sending a synchronous message will block the whole
+> [!WARNING]
+> Sending a synchronous message will block the whole
 > renderer process until the reply is received, so use this method only as a
 > last resort. It's much better to use the asynchronous version,
 > [`invoke()`](./ipc-renderer.md#ipcrendererinvokechannel-args).
 
 ### `ipcRenderer.postMessage(channel, message, [transfer])`
+
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/22404
+```
+-->
 
 * `channel` string
 * `message` any

@@ -22,7 +22,6 @@
 #include "chrome/common/pref_names.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/prefs/pref_service.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/render_frame_host.h"
@@ -241,14 +240,13 @@ void FileSelectHelper::SetFileSelectListenerForTesting(
 std::unique_ptr<ui::SelectFileDialog::FileTypeInfo>
 FileSelectHelper::GetFileTypesFromAcceptType(
     const std::vector<std::u16string>& accept_types) {
-  std::unique_ptr<ui::SelectFileDialog::FileTypeInfo> base_file_type(
-      new ui::SelectFileDialog::FileTypeInfo());
+  auto base_file_type = std::make_unique<ui::SelectFileDialog::FileTypeInfo>();
   if (accept_types.empty())
     return base_file_type;
 
   // Create FileTypeInfo and pre-allocate for the first extension list.
-  std::unique_ptr<ui::SelectFileDialog::FileTypeInfo> file_type(
-      new ui::SelectFileDialog::FileTypeInfo(*base_file_type));
+  auto file_type =
+      std::make_unique<ui::SelectFileDialog::FileTypeInfo>(*base_file_type);
   file_type->include_all_files = true;
   file_type->extensions.resize(1);
   std::vector<base::FilePath::StringType>* extensions =

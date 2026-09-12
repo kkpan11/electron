@@ -4,14 +4,27 @@
 
 #include "shell/browser/linux/x11_util.h"
 
-#include "ui/ozone/public/ozone_platform.h"
+#include "build/build_config.h"
+#include "ui/ozone/platform_selection.h"  // nogncheck
 
 namespace x11_util {
 
 bool IsX11() {
-  return ui::OzonePlatform::GetInstance()
-      ->GetPlatformProperties()
-      .electron_can_call_x11;
+#if BUILDFLAG(IS_LINUX)
+  static const bool is = ui::GetOzonePlatformId() == ui::kPlatformX11;
+  return is;
+#else
+  return false;
+#endif
+}
+
+bool IsWayland() {
+#if BUILDFLAG(IS_LINUX)
+  static const bool is = ui::GetOzonePlatformId() == ui::kPlatformWayland;
+  return is;
+#else
+  return false;
+#endif
 }
 
 }  // namespace x11_util

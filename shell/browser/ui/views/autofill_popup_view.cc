@@ -10,18 +10,23 @@
 
 #include "base/functional/bind.h"
 #include "base/i18n/rtl.h"
+#include "base/task/single_thread_task_runner.h"
 #include "cc/paint/skia_paint_canvas.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
+#include "shell/browser/osr/osr_view_proxy.h"
 #include "shell/browser/ui/autofill_popup.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
 #include "ui/events/keycodes/keyboard_codes.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/text_utils.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/border.h"
 #include "ui/views/focus/focus_manager.h"
 #include "ui/views/widget/widget.h"
@@ -39,8 +44,10 @@ AutofillPopupView::AutofillPopupView(AutofillPopup* popup,
   CreateChildViews();
   SetFocusBehavior(FocusBehavior::ALWAYS);
   set_drag_controller(this);
-  SetAccessibleRole(ax::mojom::Role::kMenu);
-  SetAccessibleName(u"Autofill Menu");
+
+  auto& view_a11y = GetViewAccessibility();
+  view_a11y.SetRole(ax::mojom::Role::kMenu);
+  view_a11y.SetName(u"Autofill Menu");
 }
 
 AutofillPopupView::~AutofillPopupView() {
@@ -63,9 +70,18 @@ AutofillPopupView::~AutofillPopupView() {
 }
 
 void AutofillPopupView::Show() {
-  bool visible = parent_widget_->IsVisible();
-  visible = visible || view_proxy_;
-  if (!popup_ || !visible || parent_widget_->IsClosed())
+  if (!popup_)
+    return;
+
+  DCHECK(parent_widget_);
+
+  // The parent Widget can outlive its NativeWidget during teardown.
+  // Don't initialize the popup after the native parent view is gone.
+  if (parent_widget_->IsClosed() || !parent_widget_->GetNativeView())
+    return;
+
+  const bool visible = view_proxy_ || parent_widget_->IsVisible();
+  if (!visible)
     return;
 
   const bool initialize_widget = !GetWidget();
@@ -92,20 +108,20 @@ void AutofillPopupView::Show() {
 
   SetBorder(views::CreateSolidBorder(
       kPopupBorderThickness,
-      GetColorProvider()->GetColor(ui::kColorUnfocusedBorder)));
+      GetColorProvider()->GetColor(ui::kColorMenuBorder)));
 
   DoUpdateBoundsAndRedrawPopup();
   GetWidget()->Show();
 
   if (initialize_widget)
-    views::WidgetFocusManager::GetInstance()->AddFocusChangeListener(this);
+    views::NativeViewFocusManager::GetInstance()->AddFocusChangeListener(this);
 
   keypress_callback_ = base::BindRepeating(
       &AutofillPopupView::HandleKeyPressEvent, base::Unretained(this));
   auto* host = popup_->frame_host_->GetRenderViewHost()->GetWidget();
   host->AddKeyPressEventCallback(keypress_callback_);
 
-  NotifyAccessibilityEventDeprecated(ax::mojom::Event::kMenuStart, true);
+  GetViewAccessibility().NotifyEvent(ax::mojom::Event::kMenuStart, true);
 }
 
 void AutofillPopupView::Hide() {
@@ -116,7 +132,7 @@ void AutofillPopupView::Hide() {
   }
 
   RemoveObserver();
-  NotifyAccessibilityEventDeprecated(ax::mojom::Event::kMenuEnd, true);
+  GetViewAccessibility().NotifyEvent(ax::mojom::Event::kMenuEnd, true);
 
   if (GetWidget()) {
     GetWidget()->Close();
@@ -159,7 +175,7 @@ void AutofillPopupView::OnSelectedRowChanged(
     int selected = current_row_selection.value_or(-1);
     if (selected == -1 || static_cast<size_t>(selected) >= children().size())
       return;
-    children().at(selected)->NotifyAccessibilityEventDeprecated(
+    children().at(selected)->GetViewAccessibility().NotifyEvent(
         ax::mojom::Event::kSelection, true);
   }
 }
@@ -170,8 +186,12 @@ void AutofillPopupView::DrawAutofillEntry(gfx::Canvas* canvas,
   if (!popup_)
     return;
 
-  canvas->FillRect(entry_rect, GetColorProvider()->GetColor(
-                                   popup_->GetBackgroundColorIDForRow(index)));
+  const bool selected = selected_line_ == index;
+  const auto* color_provider = GetColorProvider();
+  canvas->FillRect(
+      entry_rect,
+      color_provider->GetColor(selected ? ui::kColorDropdownBackgroundSelected
+                                        : ui::kColorDropdownBackground));
 
   const bool is_rtl = base::i18n::IsRTL();
   const int text_align =
@@ -179,16 +199,15 @@ void AutofillPopupView::DrawAutofillEntry(gfx::Canvas* canvas,
   gfx::Rect value_rect = entry_rect;
   value_rect.Inset(gfx::Insets::VH(0, kEndPadding));
 
-  int x_align_left = value_rect.x();
   const int value_width = gfx::GetStringWidth(
       popup_->value_at(index), popup_->GetValueFontListForRow(index));
-  int value_x_align_left = x_align_left;
-  value_x_align_left =
+  int value_x_align_left =
       is_rtl ? value_rect.right() - value_width : value_rect.x();
 
   canvas->DrawStringRectWithFlags(
       popup_->value_at(index), popup_->GetValueFontListForRow(index),
-      GetColorProvider()->GetColor(ui::kColorResultsTableNormalText),
+      color_provider->GetColor(selected ? ui::kColorDropdownForegroundSelected
+                                        : ui::kColorDropdownForeground),
       gfx::Rect(value_x_align_left, value_rect.y(), value_width,
                 value_rect.height()),
       text_align);
@@ -197,13 +216,12 @@ void AutofillPopupView::DrawAutofillEntry(gfx::Canvas* canvas,
   if (auto const& label = popup_->label_at(index); !label.empty()) {
     const int label_width =
         gfx::GetStringWidth(label, popup_->GetLabelFontListForRow(index));
-    int label_x_align_left = x_align_left;
-    label_x_align_left =
+    int label_x_align_left =
         is_rtl ? value_rect.x() : value_rect.right() - label_width;
 
     canvas->DrawStringRectWithFlags(
         label, popup_->GetLabelFontListForRow(index),
-        GetColorProvider()->GetColor(ui::kColorResultsTableDimmedText),
+        color_provider->GetColor(ui::kColorLabelForegroundSecondary),
         gfx::Rect(label_x_align_left, entry_rect.y(), label_width,
                   entry_rect.height()),
         text_align);
@@ -228,10 +246,14 @@ void AutofillPopupView::DoUpdateBoundsAndRedrawPopup() {
   if (!popup_)
     return;
 
+  views::Widget* const widget = GetWidget();
+  if (!widget)
+    return;
+
   // Clamp popup_bounds_ to ensure it's never zero-width.
   popup_->popup_bounds_.Union(
       gfx::Rect(popup_->popup_bounds_.origin(), gfx::Size(1, 1)));
-  GetWidget()->SetBounds(popup_->popup_bounds_);
+  widget->SetBounds(popup_->popup_bounds_);
   if (view_proxy_.get()) {
     view_proxy_->SetBounds(popup_->popup_bounds_in_view());
   }
@@ -255,8 +277,7 @@ void AutofillPopupView::OnPaint(gfx::Canvas* canvas) {
     canvas = &offscreen_draw_canvas.value();
   }
 
-  canvas->DrawColor(
-      GetColorProvider()->GetColor(ui::kColorResultsTableNormalBackground));
+  canvas->DrawColor(GetColorProvider()->GetColor(ui::kColorDropdownBackground));
   OnPaintBorder(canvas);
 
   for (int i = 0; i < popup_->line_count(); ++i) {
@@ -486,7 +507,7 @@ void AutofillPopupView::ClearSelection() {
 
 void AutofillPopupView::RemoveObserver() {
   parent_widget_->RemoveObserver(this);
-  views::WidgetFocusManager::GetInstance()->RemoveFocusChangeListener(this);
+  views::NativeViewFocusManager::GetInstance()->RemoveFocusChangeListener(this);
 }
 
 }  // namespace electron

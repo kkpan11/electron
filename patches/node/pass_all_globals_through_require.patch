@@ -6,10 +6,10 @@ Subject: Pass all globals through "require"
 (cherry picked from commit 7d015419cb7a0ecfe6728431a4ed2056cd411d62)
 
 diff --git a/lib/internal/modules/cjs/loader.js b/lib/internal/modules/cjs/loader.js
-index 33385fa792b71ea3802904dd3c59ce845342c595..92b368394e17a9257578cd5b7422391689732d6d 100644
+index 4bd752be19b6cc7b52d930a199ce6a94b671b1b8..f778487e8a5786143ac6090f977077bf29950b01 100644
 --- a/lib/internal/modules/cjs/loader.js
 +++ b/lib/internal/modules/cjs/loader.js
-@@ -200,6 +200,13 @@ const {
+@@ -215,6 +215,13 @@ const {
    CHAR_FORWARD_SLASH,
  } = require('internal/constants');
  
@@ -23,7 +23,7 @@ index 33385fa792b71ea3802904dd3c59ce845342c595..92b368394e17a9257578cd5b74223916
  const {
    isProxy,
  } = require('internal/util/types');
-@@ -1725,10 +1732,12 @@ Module.prototype._compile = function(content, filename, format) {
+@@ -1924,9 +1931,12 @@ Module.prototype._compile = function(content, filename, format) {
    if (this[kIsMainSymbol] && getOptionValue('--inspect-brk')) {
      const { callAndPauseOnStart } = internalBinding('inspector');
      result = callAndPauseOnStart(compiledWrapper, thisValue, exports,
@@ -31,10 +31,10 @@ index 33385fa792b71ea3802904dd3c59ce845342c595..92b368394e17a9257578cd5b74223916
 +                                 require, module, filename, dirname,
 +                                 process, localGlobal, localBuffer);
    } else {
-     result = ReflectApply(compiledWrapper, thisValue,
--                          [exports, require, module, filename, dirname]);
-+                          [exports, require, module, filename, dirname,
-+                           process, localGlobal, localBuffer]);
+-    result = FunctionPrototypeCall(compiledWrapper, thisValue, exports, require, module, filename, dirname);
++    result = FunctionPrototypeCall(compiledWrapper, thisValue, exports,
++                                   require, module, filename, dirname,
++                                   process, localGlobal, localBuffer);
    }
    this[kIsExecuting] = false;
    if (requireDepth === 0) { statCache = null; }

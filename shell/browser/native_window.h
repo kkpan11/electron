@@ -8,25 +8,26 @@
 #include <list>
 #include <memory>
 #include <optional>
-#include <queue>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "base/containers/queue.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/strings/cstring_view.h"
-#include "base/supports_user_data.h"
+#include "base/timer/timer.h"
 #include "content/public/browser/desktop_media_id.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "extensions/browser/app_window/size_constraints.h"
 #include "shell/browser/native_window_observer.h"
 #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+#include "ui/views/view_tracker.h"
 #include "ui/views/widget/widget_delegate.h"
 
-class SkRegion;
 class DraggableRegionProvider;
+class PrefService;
 
 namespace input {
 struct NativeWebKeyboardEvent;
@@ -49,10 +50,7 @@ namespace electron {
 
 class ElectronMenuModel;
 class BackgroundThrottlingSource;
-
-namespace api {
-class BrowserView;
-}
+class InspectableWebContentsView;
 
 #if BUILDFLAG(IS_MAC)
 using NativeWindowHandle = gfx::NativeView;
@@ -60,8 +58,7 @@ using NativeWindowHandle = gfx::NativeView;
 using NativeWindowHandle = gfx::AcceleratedWidget;
 #endif
 
-class NativeWindow : public base::SupportsUserData,
-                     public views::WidgetDelegate {
+class NativeWindow : public views::WidgetDelegate {
  public:
   ~NativeWindow() override;
 
@@ -72,6 +69,7 @@ class NativeWindow : public base::SupportsUserData,
   // Create window with existing WebContents, the caller is responsible for
   // managing the window's live.
   static std::unique_ptr<NativeWindow> Create(
+      int32_t base_window_id,
       const gin_helper::Dictionary& options,
       NativeWindow* parent = nullptr);
 
@@ -81,10 +79,9 @@ class NativeWindow : public base::SupportsUserData,
 
   virtual void SetContentView(views::View* view) = 0;
 
-  // wrapper around CloseImpl that checks that window_ can be closed
-  void Close();
-  // wrapper around CloseImmediatelyImpl that checks that window_ can be closed
-  void CloseImmediately();
+  virtual void Close() = 0;
+  virtual void CloseImmediately() = 0;
+  virtual bool IsClosed() const;
   virtual void Focus(bool focus) = 0;
   virtual bool IsFocused() const = 0;
   virtual void Show() = 0;
@@ -101,18 +98,19 @@ class NativeWindow : public base::SupportsUserData,
   virtual bool IsMinimized() const = 0;
   virtual void SetFullScreen(bool fullscreen) = 0;
   virtual bool IsFullscreen() const = 0;
-  virtual void SetBounds(const gfx::Rect& bounds, bool animate = false) = 0;
-  virtual gfx::Rect GetBounds() const = 0;
 
+  virtual void SetBounds(const gfx::Rect& bounds, bool animate) = 0;
+  virtual gfx::Rect GetBounds() const = 0;
+  void SetShape(const std::vector<gfx::Rect>& rects);
   void SetSize(const gfx::Size& size, bool animate = false);
   [[nodiscard]] gfx::Size GetSize() const;
 
   void SetPosition(const gfx::Point& position, bool animate = false);
   [[nodiscard]] gfx::Point GetPosition() const;
 
-  virtual void SetContentSize(const gfx::Size& size, bool animate = false);
+  void SetContentSize(const gfx::Size& size, bool animate = false);
   virtual gfx::Size GetContentSize() const;
-  virtual void SetContentBounds(const gfx::Rect& bounds, bool animate = false);
+  void SetContentBounds(const gfx::Rect& bounds, bool animate = false);
   virtual gfx::Rect GetContentBounds() const;
   virtual bool IsNormal() const;
   virtual gfx::Rect GetNormalBounds() const = 0;
@@ -156,10 +154,10 @@ class NativeWindow : public base::SupportsUserData,
   virtual ui::ZOrderLevel GetZOrderLevel() const = 0;
   virtual void Center() = 0;
   virtual void Invalidate() = 0;
+  [[nodiscard]] virtual bool IsActive() const = 0;
 #if BUILDFLAG(IS_MAC)
   virtual std::string GetAlwaysOnTopLevel() const = 0;
   virtual void SetActive(bool is_key) = 0;
-  virtual bool IsActive() const = 0;
   virtual void RemoveChildFromParentWindow() = 0;
   virtual void RemoveChildWindow(NativeWindow* child) = 0;
   virtual void AttachChildren() = 0;
@@ -169,9 +167,11 @@ class NativeWindow : public base::SupportsUserData,
   void SetTitle(std::string_view title);
   [[nodiscard]] std::string GetTitle() const;
 
+  [[nodiscard]] std::string GetName() const;
+
   // Ability to augment the window title for the screen readers.
   void SetAccessibleTitle(const std::string& title);
-  std::string GetAccessibleTitle();
+  [[nodiscard]] std::string GetAccessibleTitle() const;
 
   virtual void FlashFrame(bool flash) = 0;
   virtual void SetSkipTaskbar(bool skip) = 0;
@@ -190,6 +190,8 @@ class NativeWindow : public base::SupportsUserData,
   virtual bool HasShadow() const = 0;
   virtual void SetOpacity(const double opacity) = 0;
   virtual double GetOpacity() const = 0;
+  // NaN is treated as fully opaque, then the value is clamped to [0, 1].
+  static double ClampOpacity(double opacity);
   virtual void SetRepresentedFilename(const std::string& filename) {}
   virtual std::string GetRepresentedFilename() const;
   virtual void SetDocumentEdited(bool edited) {}
@@ -232,6 +234,10 @@ class NativeWindow : public base::SupportsUserData,
 
   // Vibrancy API
   virtual void SetVibrancy(const std::string& type, int duration);
+
+  const std::string& background_material() const {
+    return background_material_;
+  }
 
   virtual void SetBackgroundMaterial(const std::string& type);
 
@@ -319,7 +325,7 @@ class NativeWindow : public base::SupportsUserData,
   void NotifyWindowRestore();
   void NotifyWindowMove();
   void NotifyWindowWillResize(const gfx::Rect& new_bounds,
-                              const gfx::ResizeEdge& edge,
+                              gfx::ResizeEdge edge,
                               bool* prevent_default);
   void NotifyWindowResize();
   void NotifyWindowResized();
@@ -333,16 +339,21 @@ class NativeWindow : public base::SupportsUserData,
   virtual void NotifyWindowLeaveFullScreen();
   void NotifyWindowEnterHtmlFullScreen();
   void NotifyWindowLeaveHtmlFullScreen();
-  void NotifyWindowAlwaysOnTopChanged();
+  void NotifyWindowAlwaysOnTopChanged(bool is_always_on_top);
   void NotifyWindowExecuteAppCommand(std::string_view command_name);
   void NotifyTouchBarItemInteraction(const std::string& item_id,
-                                     base::Value::Dict details);
+                                     base::DictValue details);
   void NotifyNewWindowForTab();
   void NotifyWindowSystemContextMenu(int x, int y, bool* prevent_default);
   void NotifyLayoutWindowControlsOverlay();
+  void NotifyWindowStateRestored();
 
 #if BUILDFLAG(IS_WIN)
   void NotifyWindowMessage(UINT message, WPARAM w_param, LPARAM l_param);
+  virtual void SetAccentColor(
+      std::variant<std::monostate, bool, SkColor> accent_color) = 0;
+  virtual std::variant<bool, std::string> GetAccentColor() const = 0;
+  virtual void UpdateWindowAccentColor(bool active) = 0;
 #endif
 
   void AddObserver(NativeWindowObserver* obs) { observers_.AddObserver(obs); }
@@ -373,14 +384,16 @@ class NativeWindow : public base::SupportsUserData,
   views::Widget* widget() const { return widget_.get(); }
   views::View* content_view() const { return content_view_; }
 
-  enum class TitleBarStyle {
+  enum class TitleBarStyle : uint8_t {
     kNormal,
     kHidden,
     kHiddenInset,
     kCustomButtonsOnHover,
   };
 
-  TitleBarStyle title_bar_style() const { return title_bar_style_; }
+  [[nodiscard]] TitleBarStyle title_bar_style() const {
+    return title_bar_style_;
+  }
 
   bool IsWindowControlsOverlayEnabled() const {
     bool valid_titlebar_style = title_bar_style() == TitleBarStyle::kHidden
@@ -393,20 +406,17 @@ class NativeWindow : public base::SupportsUserData,
   }
 
   int titlebar_overlay_height() const { return titlebar_overlay_height_; }
-  void set_titlebar_overlay_height(int height) {
-    titlebar_overlay_height_ = height;
-  }
 
-  bool has_frame() const { return has_frame_; }
+  [[nodiscard]] bool has_frame() const { return has_frame_; }
 
-  bool has_client_frame() const { return has_client_frame_; }
-  bool transparent() const { return transparent_; }
-  bool enable_larger_than_screen() const { return enable_larger_than_screen_; }
+  NativeWindow* parent() const { return parent_.get(); }
 
-  NativeWindow* parent() const { return parent_; }
-  bool is_modal() const { return is_modal_; }
+  [[nodiscard]] bool is_modal() const { return is_modal_; }
 
-  int32_t window_id() const { return window_id_; }
+  [[nodiscard]] constexpr int32_t window_id() const { return window_id_; }
+
+  InspectableWebContentsView* primary_web_contents_view();
+  void InitPrimaryWebContentsView(InspectableWebContentsView* view);
 
   void add_child_window(NativeWindow* child) {
     child_windows_.push_back(child);
@@ -429,12 +439,53 @@ class NativeWindow : public base::SupportsUserData,
   // throttling, then throttling in the `ui::Compositor` will be disabled.
   void UpdateBackgroundThrottlingState();
 
+  [[nodiscard]] auto base_window_id() const { return base_window_id_; }
+
+  // Saves current window state to the Local State JSON file in
+  // app.getPath('userData') via PrefService.
+  // This does NOT immediately write to disk - it updates the in-memory
+  // preference store and queues an asynchronous write operation. The actual
+  // disk write is batched and flushed later.
+  void SaveWindowState();
+  void DebouncedSaveWindowState();
+  // Flushes save_window_state_timer_ that was queued by
+  // DebouncedSaveWindowState. This does NOT flush the actual disk write.
+  void FlushWindowState();
+  // Fires save_window_state_timer_ now if DebouncedSaveWindowState started it,
+  // so the electron_common_testing binding can make the debounced save
+  // deterministic in specs. Unlike FlushWindowState this has no other side
+  // effects, and it does NOT flush the actual disk write either.
+  void FlushPendingWindowStateSaveForTesting();
+
+  // Restores window state - bounds first and then display mode.
+  void RestoreWindowState(const gin_helper::Dictionary& options);
+  // Applies saved bounds to the window.
+  void RestoreBounds(const display::Display& display,
+                     const gfx::Rect& saved_work_area,
+                     gfx::Rect& saved_bounds);
+  // Flushes pending display mode restoration (fullscreen, maximized, kiosk)
+  // that was deferred during initialization to respect show=false. This
+  // consumes and clears the restore_display_mode_callback_.
+  void FlushPendingDisplayMode();
+
  protected:
-  constexpr void set_has_frame(const bool val) { has_frame_ = val; }
+  NativeWindow(int32_t base_window_id,
+               const gin_helper::Dictionary& options,
+               NativeWindow* parent);
 
-  [[nodiscard]] constexpr bool is_closed() const { return is_closed_; }
+  void set_titlebar_overlay_height(int height) {
+    titlebar_overlay_height_ = height;
+  }
 
-  NativeWindow(const gin_helper::Dictionary& options, NativeWindow* parent);
+  [[nodiscard]] bool has_client_frame() const { return has_client_frame_; }
+
+  [[nodiscard]] bool transparent() const { return transparent_; }
+
+  [[nodiscard]] bool is_closed() const { return is_closed_; }
+
+  [[nodiscard]] bool enable_larger_than_screen() const {
+    return enable_larger_than_screen_;
+  }
 
   virtual void OnTitleChanged() {}
 
@@ -447,21 +498,15 @@ class NativeWindow : public base::SupportsUserData,
   // views::WidgetDelegate:
   views::Widget* GetWidget() override;
   const views::Widget* GetWidget() const override;
-  std::u16string GetAccessibleWindowTitle() const override;
 
   void set_content_view(views::View* view) { content_view_ = view; }
-
-  virtual void CloseImpl() = 0;
-  virtual void CloseImmediatelyImpl() = 0;
+  void FlushPendingRootLayout(views::View* view);
 
   static inline constexpr base::cstring_view kNativeWindowKey =
       "__ELECTRON_NATIVE_WINDOW__";
 
   // The boolean parsing of the "titleBarOverlay" option
   bool titlebar_overlay_ = false;
-
-  // The "titleBarStyle" option.
-  TitleBarStyle title_bar_style_ = TitleBarStyle::kNormal;
 
   // Minimum and maximum size.
   std::optional<extensions::SizeConstraints> size_constraints_;
@@ -470,17 +515,47 @@ class NativeWindow : public base::SupportsUserData,
   // on HiDPI displays on some environments.
   std::optional<extensions::SizeConstraints> content_size_constraints_;
 
-  std::queue<bool> pending_transitions_;
+  base::queue<bool> pending_transitions_;
+
   FullScreenTransitionType fullscreen_transition_type_ =
       FullScreenTransitionType::kNone;
 
   std::list<NativeWindow*> child_windows_;
 
  private:
-  std::unique_ptr<views::Widget> widget_;
+  static bool PlatformHasClientFrame();
+
+  std::unique_ptr<views::Widget> widget_ = std::make_unique<views::Widget>();
 
   static inline int32_t next_id_ = 0;
   const int32_t window_id_ = ++next_id_;
+
+  // ID of the api::BaseWindow that owns this NativeWindow.
+  const int32_t base_window_id_;
+
+  // Identifier for the window provided by the application.
+  // Used by Electron internally for features such as state persistence.
+  std::string window_name_;
+
+  // The "titleBarStyle" option.
+  const TitleBarStyle title_bar_style_;
+
+  // Whether window has standard frame, but it's drawn by Electron (the client
+  // application) instead of the OS. Currently only has meaning on Linux for
+  // Wayland hosts.
+  const bool has_client_frame_ = PlatformHasClientFrame();
+
+  // Whether window is transparent.
+  const bool transparent_;
+
+  // Whether window can be resized larger than screen.
+  const bool enable_larger_than_screen_;
+
+  // Is this a modal window.
+  const bool is_modal_;
+
+  // Whether window has standard frame.
+  const bool has_frame_;
 
   // The content view, weak ref.
   raw_ptr<views::View> content_view_ = nullptr;
@@ -488,20 +563,6 @@ class NativeWindow : public base::SupportsUserData,
   // The custom height parsed from the "height" option in a Object
   // "titleBarOverlay"
   int titlebar_overlay_height_ = 0;
-
-  // Whether window has standard frame.
-  bool has_frame_ = true;
-
-  // Whether window has standard frame, but it's drawn by Electron (the client
-  // application) instead of the OS. Currently only has meaning on Linux for
-  // Wayland hosts.
-  bool has_client_frame_ = false;
-
-  // Whether window is transparent.
-  bool transparent_ = false;
-
-  // Whether window can be resized larger than screen.
-  bool enable_larger_than_screen_ = false;
 
   // The windows has been closed.
   bool is_closed_ = false;
@@ -516,29 +577,60 @@ class NativeWindow : public base::SupportsUserData,
   double aspect_ratio_ = 0.0;
   gfx::Size aspect_ratio_extraSize_;
 
-  // The parent window, it is guaranteed to be valid during this window's life.
-  raw_ptr<NativeWindow> parent_ = nullptr;
-
-  // Is this a modal window.
-  bool is_modal_ = false;
+  // The parent window. Held weakly because the parent may be destroyed
+  // before this window (e.g. a modal child whose parent is destroy()ed).
+  base::WeakPtr<NativeWindow> parent_;
 
   bool is_transitioning_fullscreen_ = false;
 
   std::list<DraggableRegionProvider*> draggable_region_providers_;
 
   // Observers of this window.
-  base::ObserverList<NativeWindowObserver> observers_;
+  base::ObserverList<NativeWindowObserver,
+                     false,
+                     base::ObserverListReentrancyPolicy::kAllowReentrancy>
+      observers_;
 
   absl::flat_hash_set<BackgroundThrottlingSource*>
       background_throttling_sources_;
-
-  // Accessible title.
-  std::u16string accessible_title_;
 
   std::string vibrancy_;
   std::string background_material_;
 
   gfx::Rect overlay_rect_;
+
+  // Flag to prevent SaveWindowState calls during window restoration.
+  bool is_being_restored_ = false;
+
+  // True while a restoration-initiated display-mode transition
+  // (fullscreen/maximize/kiosk) is in flight. Cleared from the matching
+  // Notify* observer once the (possibly async) transition completes.
+  bool awaiting_restore_display_mode_transition_ = false;
+
+  // The boolean parsing of the "windowStatePersistence" option
+  bool window_state_persistence_enabled_ = false;
+
+  // PrefService is used to persist window bounds and state.
+  // Only populated when windowStatePersistence is enabled and window has a
+  // valid name.
+  raw_ptr<PrefService> prefs_ = nullptr;
+
+  // Whether to restore bounds.
+  bool restore_bounds_ = false;
+  // Whether to restore display mode.
+  bool restore_display_mode_ = false;
+  // Callback to restore display mode.
+  base::OnceCallback<void()> restore_display_mode_callback_;
+
+  // Timer to debounce window state saving operations.
+  base::OneShotTimer save_window_state_timer_;
+
+  // Minimum height of the visible part of a window.
+  const int kMinVisibleHeight = 100;
+  // Minimum width of the visible part of a window.
+  const int kMinVisibleWidth = 100;
+
+  views::ViewTracker primary_web_contents_view_;
 
   base::WeakPtrFactory<NativeWindow> weak_factory_{this};
 };

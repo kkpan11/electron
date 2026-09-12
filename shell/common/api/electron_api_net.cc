@@ -4,12 +4,12 @@
 
 #include <string>
 
-#include "gin/handle.h"
 #include "net/base/filename_util.h"
 #include "net/base/network_change_notifier.h"
 #include "net/http/http_util.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/mojom/host_resolver.mojom.h"
+#include "shell/browser/api/electron_api_web_socket.h"
 #include "shell/browser/net/resolve_host_function.h"
 #include "shell/common/api/electron_api_url_loader.h"
 #include "shell/common/gin_converters/file_path_converter.h"
@@ -17,7 +17,6 @@
 #include "shell/common/gin_converters/net_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
-#include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/node_includes.h"
 
@@ -75,18 +74,20 @@ v8::Local<v8::Promise> ResolveHost(
 }
 
 using electron::api::SimpleURLLoaderWrapper;
+using electron::api::WebSocketWrapper;
 
 void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
 
-  gin_helper::Dictionary dict(isolate, exports);
+  gin_helper::Dictionary dict{isolate, exports};
   dict.SetMethod("isOnline", &IsOnline);
   dict.SetMethod("isValidHeaderName", &IsValidHeaderName);
   dict.SetMethod("isValidHeaderValue", &IsValidHeaderValue);
   dict.SetMethod("createURLLoader", &SimpleURLLoaderWrapper::Create);
+  dict.SetMethod("createWebSocket", &WebSocketWrapper::Create);
   dict.SetMethod("fileURLToFilePath", &FileURLToFilePath);
   dict.SetMethod("resolveHost", &ResolveHost);
 }

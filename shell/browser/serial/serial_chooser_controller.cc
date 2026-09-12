@@ -8,9 +8,9 @@
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "chrome/browser/serial/serial_blocklist.h"
 #include "content/public/browser/console_message.h"
 #include "content/public/browser/web_contents.h"
@@ -105,7 +105,8 @@ bool BluetoothPortIsAllowed(
   if (*port.bluetooth_service_class_id == device::GetSerialPortProfileUUID()) {
     return true;
   }
-  return base::Contains(allowed_ids, port.bluetooth_service_class_id.value());
+  return std::ranges::contains(allowed_ids,
+                               port.bluetooth_service_class_id.value());
 }
 
 }  // namespace
@@ -124,7 +125,7 @@ SerialChooserController::SerialChooserController(
           std::move(allowed_bluetooth_service_class_ids)),
       callback_(std::move(callback)),
       initiator_document_(render_frame_host->GetWeakDocumentPtr()) {
-  origin_ = web_contents_->GetPrimaryMainFrame()->GetLastCommittedOrigin();
+  origin_ = render_frame_host->GetLastCommittedOrigin();
 
   chooser_context_ = SerialChooserContextFactory::GetForBrowserContext(
                          web_contents_->GetBrowserContext())
@@ -142,7 +143,7 @@ SerialChooserController::~SerialChooserController() {
   RunCallback(/*port=*/nullptr);
 }
 
-api::Session* SerialChooserController::GetSession() {
+gin::WeakCell<api::Session>* SerialChooserController::GetSession() {
   if (!web_contents_) {
     return nullptr;
   }
@@ -160,8 +161,10 @@ void SerialChooserController::GetDevices() {
     }
   }
 
-  chooser_context_->GetPortManager()->GetDevices(base::BindOnce(
-      &SerialChooserController::OnGetDevices, weak_factory_.GetWeakPtr()));
+  chooser_context_->GetPortManager()->GetDevices(
+      /*allow_bluetooth_system_prompt=*/true,
+      base::BindOnce(&SerialChooserController::OnGetDevices,
+                     weak_factory_.GetWeakPtr()));
 }
 
 void SerialChooserController::AdapterPoweredChanged(BluetoothAdapter* adapter,
@@ -179,9 +182,10 @@ void SerialChooserController::OnPortAdded(
 
   ports_.push_back(port.Clone());
 
-  api::Session* session = GetSession();
-  if (session) {
-    session->Emit("serial-port-added", port.Clone(), web_contents_.get());
+  gin::WeakCell<api::Session>* session = GetSession();
+  if (session && session->Get()) {
+    session->Get()->Emit("serial-port-added", port.Clone(),
+                         web_contents_.get());
   }
 }
 
@@ -190,8 +194,11 @@ void SerialChooserController::OnPortRemoved(
   const auto it = std::ranges::find(ports_, port.token,
                                     &device::mojom::SerialPortInfo::token);
   if (it != ports_.end()) {
-    if (api::Session* session = GetSession())
-      session->Emit("serial-port-removed", port.Clone(), web_contents_.get());
+    gin::WeakCell<api::Session>* session = GetSession();
+    if (session && session->Get()) {
+      session->Get()->Emit("serial-port-removed", port.Clone(),
+                           web_contents_.get());
+    }
     ports_.erase(it);
   }
 }
@@ -235,8 +242,9 @@ void SerialChooserController::OnGetDevices(
   }
 
   bool prevent_default = false;
-  if (api::Session* session = GetSession()) {
-    prevent_default = session->Emit(
+  gin::WeakCell<api::Session>* session = GetSession();
+  if (session && session->Get()) {
+    prevent_default = session->Get()->Emit(
         "select-serial-port", ports_, web_contents_.get(),
         base::BindRepeating(&SerialChooserController::OnDeviceChosen,
                             weak_factory_.GetWeakPtr()));

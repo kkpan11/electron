@@ -10,11 +10,11 @@ The keyed mutex introduce extra performance cost and spikes. However, at offscre
 For resolving complex conflict please pin @reitowo
 For more reason please see: https://crrev.com/c/5465148
 
-diff --git a/gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc b/gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
-index c821349f35116f07988b2b58a6521e73a514548c..2b8f41a584c5d14ea9d72d67c2abe71eed4a54ac 100644
---- a/gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
-+++ b/gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
-@@ -178,7 +178,8 @@ gfx::GpuMemoryBufferHandle GpuMemoryBufferFactoryDXGI::CreateGpuMemoryBuffer(
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+index 78bae674bb15266927ac54740de534156b3bf2a0..a048ad760c3b5d75ba3329434e52943afe2cfa53 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+@@ -372,7 +372,8 @@ gfx::GpuMemoryBufferHandle D3DImageBackingFactory::CreateGpuMemoryBufferHandle(
    // so make sure that the usage is one that we support.
    DCHECK(usage == gfx::BufferUsage::GPU_READ ||
           usage == gfx::BufferUsage::SCANOUT ||
@@ -24,7 +24,7 @@ index c821349f35116f07988b2b58a6521e73a514548c..2b8f41a584c5d14ea9d72d67c2abe71e
        << "Incorrect usage, usage=" << gfx::BufferUsageToString(usage);
  
    D3D11_TEXTURE2D_DESC desc = {
-@@ -192,7 +193,9 @@ gfx::GpuMemoryBufferHandle GpuMemoryBufferFactoryDXGI::CreateGpuMemoryBuffer(
+@@ -386,7 +387,9 @@ gfx::GpuMemoryBufferHandle D3DImageBackingFactory::CreateGpuMemoryBufferHandle(
        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
        0,
        D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
@@ -35,22 +35,13 @@ index c821349f35116f07988b2b58a6521e73a514548c..2b8f41a584c5d14ea9d72d67c2abe71e
  
    Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
  
-diff --git a/media/video/renderable_gpu_memory_buffer_video_frame_pool.cc b/media/video/renderable_gpu_memory_buffer_video_frame_pool.cc
-index 7c90eca71d39521ec1968a946b6c68c9a564d225..9c40397be51f1ce30cbe73d8c6fc0bb279c95d7a 100644
---- a/media/video/renderable_gpu_memory_buffer_video_frame_pool.cc
-+++ b/media/video/renderable_gpu_memory_buffer_video_frame_pool.cc
-@@ -196,7 +196,7 @@ gfx::Size GetBufferSizeInPixelsForVideoPixelFormat(
- bool FrameResources::Initialize() {
-   auto* context = pool_->GetContext();
- 
--  constexpr gfx::BufferUsage kBufferUsage =
-+  gfx::BufferUsage buffer_usage =
- #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS)
-       gfx::BufferUsage::SCANOUT_VEA_CPU_READ
- #else
-@@ -210,6 +210,23 @@ bool FrameResources::Initialize() {
-   const gfx::Size buffer_size_in_pixels =
-       GetBufferSizeInPixelsForVideoPixelFormat(format_, coded_size_);
+diff --git a/media/video/renderable_mappable_shared_image_video_frame_pool.cc b/media/video/renderable_mappable_shared_image_video_frame_pool.cc
+index 831725ed249a80ea6033702ff91a37a23e8a24d4..02d9e89d7913971b06c6f498dc192f34a588281e 100644
+--- a/media/video/renderable_mappable_shared_image_video_frame_pool.cc
++++ b/media/video/renderable_mappable_shared_image_video_frame_pool.cc
+@@ -212,6 +212,24 @@ bool FrameResources::Initialize(VideoPixelFormat format,
+   const gfx::Size coded_size =
+       GetCodedSizeForVideoPixelFormat(format, visible_size_);
  
 +#if BUILDFLAG(IS_WIN)
 +  // For CEF OSR feature, currently there's no other place in chromium use RGBA.
@@ -58,7 +49,8 @@ index 7c90eca71d39521ec1968a946b6c68c9a564d225..9c40397be51f1ce30cbe73d8c6fc0bb2
 +  // once the GMB is returned from CopyRequest. So there will be no race
 +  // condition on that texture. We can request a GMB without a keyed mutex to
 +  // accelerate and probably prevent some driver deadlock.
-+  if (format_ == PIXEL_FORMAT_ARGB || format_ == PIXEL_FORMAT_ABGR) {
++  if (format == PIXEL_FORMAT_ARGB || format == PIXEL_FORMAT_ABGR ||
++      format == PIXEL_FORMAT_RGBAF16) {
 +    // This value is 'borrowed', SCANOUT_VEA_CPU_READ is probably invalid
 +    // cause there's no real SCANOUT on Windows. We simply use this enum as a
 +    // flag to disable mutex in the GMBFactoryDXGI because this enum is also
@@ -72,12 +64,3 @@ index 7c90eca71d39521ec1968a946b6c68c9a564d225..9c40397be51f1ce30cbe73d8c6fc0bb2
    gpu::SharedImageUsageSet usage =
  #if BUILDFLAG(IS_MAC)
        gpu::SHARED_IMAGE_USAGE_MACOS_VIDEO_TOOLBOX |
-@@ -250,7 +267,7 @@ bool FrameResources::Initialize() {
-       viz::GetSharedImageFormat(buffer_format);
- 
-   shared_image_ =
--      context->CreateSharedImage(buffer_size_in_pixels, kBufferUsage, si_format,
-+      context->CreateSharedImage(buffer_size_in_pixels, buffer_usage, si_format,
-                                  color_space_, usage, sync_token_);
-   if (!shared_image_) {
-     DLOG(ERROR) << "Failed to allocate shared image for frame: coded_size="

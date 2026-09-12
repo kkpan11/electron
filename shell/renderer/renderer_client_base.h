@@ -6,6 +6,7 @@
 #define ELECTRON_SHELL_RENDERER_RENDERER_CLIENT_BASE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "content/public/renderer/content_renderer_client.h"
@@ -56,12 +57,15 @@ class RendererClientBase : public content::ContentRendererClient
                     mojo::ScopedMessagePipeHandle interface_pipe) override;
 #endif
 
-  virtual void DidCreateScriptContext(v8::Local<v8::Context> context,
-                                      content::RenderFrame* render_frame) = 0;
-  virtual void WillReleaseScriptContext(v8::Local<v8::Context> context,
+  virtual void DidCreateScriptContext(v8::Isolate* isolate,
+                                      v8::Local<v8::Context> context,
+                                      content::RenderFrame* render_frame);
+  virtual void WillReleaseScriptContext(v8::Isolate* isolate,
+                                        v8::Local<v8::Context> context,
                                         content::RenderFrame* render_frame) = 0;
   virtual void DidClearWindowObject(content::RenderFrame* render_frame);
-  virtual void SetupMainWorldOverrides(v8::Local<v8::Context> context,
+  virtual void SetupMainWorldOverrides(v8::Isolate* isolate,
+                                       v8::Local<v8::Context> context,
                                        content::RenderFrame* render_frame);
 
   std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
@@ -71,12 +75,25 @@ class RendererClientBase : public content::ContentRendererClient
   v8::Local<v8::Context> GetContext(blink::WebLocalFrame* frame,
                                     v8::Isolate* isolate) const;
 
+  // The context of |render_frame|'s Node.js environment, or an empty handle if
+  // it has none. Once a frame has an environment, the Electron API stays in
+  // that context until it is released, even if the frame's WebPreferences
+  // change: a window.open() child starts with its opener's preferences and
+  // gets its own later.
+  virtual v8::Local<v8::Context> GetEnvironmentContext(
+      content::RenderFrame* render_frame) const;
+
+  // The world of GetEnvironmentContext(), if |render_frame| has an environment.
+  virtual std::optional<int> GetEnvironmentWorldId(
+      content::RenderFrame* render_frame) const;
+
   static void AllowGuestViewElementDefinition(
       v8::Isolate* isolate,
       v8::Local<v8::Object> context,
       v8::Local<v8::Function> register_cb);
 
-  bool IsWebViewFrame(v8::Local<v8::Context> context,
+  bool IsWebViewFrame(v8::Isolate* isolate,
+                      v8::Local<v8::Context> context,
                       content::RenderFrame* render_frame) const;
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
@@ -88,13 +105,15 @@ class RendererClientBase : public content::ContentRendererClient
                    gin_helper::Dictionary* process,
                    content::RenderFrame* render_frame);
 
-  bool ShouldLoadPreload(v8::Local<v8::Context> context,
+  bool ShouldLoadPreload(v8::Isolate* isolate,
+                         v8::Local<v8::Context> context,
                          content::RenderFrame* render_frame) const;
 
   // content::ContentRendererClient:
   void RenderThreadStarted() override;
   void ExposeInterfacesToBrowser(mojo::BinderMap* binders) override;
   void RenderFrameCreated(content::RenderFrame*) override;
+  void SetPendingCreateNewWindowStartupData(mojo_base::BigBuffer data) override;
   bool OverrideCreatePlugin(content::RenderFrame* render_frame,
                             const blink::WebPluginParams& params,
                             blink::WebPlugin** plugin) override;
@@ -111,14 +130,13 @@ class RendererClientBase : public content::ContentRendererClient
   void RunScriptsAtDocumentEnd(content::RenderFrame* render_frame) override;
   void RunScriptsAtDocumentIdle(content::RenderFrame* render_frame) override;
 
-  bool AllowScriptExtensionForServiceWorker(
-      const url::Origin& script_origin) override;
   void DidInitializeServiceWorkerContextOnWorkerThread(
       blink::WebServiceWorkerContextProxy* context_proxy,
       const GURL& service_worker_scope,
       const GURL& script_url) override;
   void WillEvaluateServiceWorkerOnWorkerThread(
       blink::WebServiceWorkerContextProxy* context_proxy,
+      v8::Isolate* const isolate,
       v8::Local<v8::Context> v8_context,
       int64_t service_worker_version_id,
       const GURL& service_worker_scope,
@@ -127,12 +145,18 @@ class RendererClientBase : public content::ContentRendererClient
   void DidStartServiceWorkerContextOnWorkerThread(
       int64_t service_worker_version_id,
       const GURL& service_worker_scope,
-      const GURL& script_url) override;
+      const GURL& script_url,
+      const blink::ServiceWorkerToken& service_worker_token) override;
   void WillDestroyServiceWorkerContextOnWorkerThread(
       v8::Local<v8::Context> context,
       int64_t service_worker_version_id,
       const GURL& service_worker_scope,
-      const GURL& script_url) override;
+      const GURL& script_url,
+      const blink::ServiceWorkerToken& service_worker_token) override;
+  void WorkerScriptReadyForEvaluationOnWorkerThread(
+      v8::Local<v8::Context> context) override;
+  void WillDestroyWorkerContextOnWorkerThread(
+      v8::Local<v8::Context> context) override;
   void WebViewCreated(blink::WebView* web_view,
                       bool was_created_by_renderer,
                       const url::Origin* outermost_origin) override;
@@ -142,6 +166,9 @@ class RendererClientBase : public content::ContentRendererClient
   std::unique_ptr<extensions::ExtensionsClient> extensions_client_;
   std::unique_ptr<ElectronExtensionsRendererClient> extensions_renderer_client_;
 #endif
+
+  // Receives the per-process service-worker startup data push from the
+  // browser, replacing the BROWSER_SANDBOX_LOAD sync IPC for SW preload realms.
 
   std::string renderer_client_id_;
   // An increasing ID used for identifying an V8 context in this process.

@@ -9,6 +9,7 @@
 #include "base/functional/bind.h"
 #include "base/strings/string_util.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/global_routing_id.h"
 #include "extensions/browser/extension_navigation_ui_data.h"
 #include "net/base/ip_endpoint.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -17,7 +18,7 @@
 namespace electron {
 
 ProxyingWebSocket::ProxyingWebSocket(
-    WebRequestAPI* web_request_api,
+    api::WebRequest* web_request,
     WebSocketFactory factory,
     const network::ResourceRequest& request,
     mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
@@ -27,7 +28,7 @@ ProxyingWebSocket::ProxyingWebSocket(
     int render_frame_id,
     content::BrowserContext* browser_context,
     uint64_t* request_id_generator)
-    : web_request_api_(web_request_api),
+    : web_request_{web_request},
       request_(request),
       factory_(std::move(factory)),
       forwarding_handshake_client_(std::move(handshake_client)),
@@ -36,8 +37,7 @@ ProxyingWebSocket::ProxyingWebSocket(
       has_extra_headers_(has_extra_headers),
       info_(extensions::WebRequestInfoInitParams(
           ++(*request_id_generator),
-          process_id,
-          render_frame_id,
+          content::GlobalRenderFrameHostId(process_id, render_frame_id),
           nullptr,
           request,
           /*is_download=*/false,
@@ -48,7 +48,7 @@ ProxyingWebSocket::ProxyingWebSocket(
 ProxyingWebSocket::~ProxyingWebSocket() {
   if (on_before_send_headers_callback_) {
     std::move(on_before_send_headers_callback_)
-        .Run(net::ERR_ABORTED, std::nullopt);
+        .Run(net::ERR_ABORTED, std::nullopt, std::nullopt);
   }
   if (on_headers_received_callback_) {
     std::move(on_headers_received_callback_)
@@ -70,8 +70,8 @@ void ProxyingWebSocket::Start() {
                             weak_factory_.GetWeakPtr());
   }
 
-  int result = web_request_api_->OnBeforeRequest(&info_, request_, continuation,
-                                                 &redirect_url_);
+  int result = web_request_->OnBeforeRequest(&info_, request_, continuation,
+                                             &redirect_url_);
 
   if (result == net::ERR_BLOCKED_BY_CLIENT) {
     OnError(result);
@@ -97,7 +97,7 @@ void ProxyingWebSocket::ContinueToHeadersReceived() {
       base::BindRepeating(&ProxyingWebSocket::OnHeadersReceivedComplete,
                           weak_factory_.GetWeakPtr());
   info_.AddResponseInfoFromResourceResponse(*response_);
-  int result = web_request_api_->OnHeadersReceived(
+  int result = web_request_->OnHeadersReceived(
       &info_, request_, continuation, response_->headers.get(),
       &override_headers_, &redirect_url_);
 
@@ -142,8 +142,7 @@ void ProxyingWebSocket::OnConnectionEstablished(
       base::MakeRefCounted<net::HttpResponseHeaders>(absl::StrFormat(
           "HTTP/%d.%d %d %s", handshake_response_->http_version.major_value(),
           handshake_response_->http_version.minor_value(),
-          handshake_response_->status_code,
-          handshake_response_->status_text.c_str()));
+          handshake_response_->status_code, handshake_response_->status_text));
   for (const auto& header : handshake_response_->headers)
     response_->headers->AddHeader(header->name, header->value);
 
@@ -153,7 +152,7 @@ void ProxyingWebSocket::OnConnectionEstablished(
 void ProxyingWebSocket::ContinueToCompleted() {
   DCHECK(forwarding_handshake_client_);
   DCHECK(is_done_);
-  web_request_api_->OnCompleted(&info_, request_, net::ERR_WS_UPGRADE);
+  web_request_->OnCompleted(&info_, request_, net::ERR_WS_UPGRADE);
   forwarding_handshake_client_->OnConnectionEstablished(
       std::move(websocket_), std::move(client_receiver_),
       std::move(handshake_response_), std::move(readable_),
@@ -181,7 +180,7 @@ void ProxyingWebSocket::OnAuthRequired(
       base::BindRepeating(&ProxyingWebSocket::OnHeadersReceivedCompleteForAuth,
                           weak_factory_.GetWeakPtr(), auth_info);
   info_.AddResponseInfoFromResourceResponse(*response_);
-  int result = web_request_api_->OnHeadersReceived(
+  int result = web_request_->OnHeadersReceived(
       &info_, request_, continuation, response_->headers.get(),
       &override_headers_, &redirect_url_);
 
@@ -199,6 +198,7 @@ void ProxyingWebSocket::OnAuthRequired(
 }
 
 void ProxyingWebSocket::OnBeforeSendHeaders(
+    const GURL& request_url,
     const net::HttpRequestHeaders& headers,
     OnBeforeSendHeadersCallback callback) {
   DCHECK(receiver_as_header_client_.is_bound());
@@ -208,9 +208,11 @@ void ProxyingWebSocket::OnBeforeSendHeaders(
   OnBeforeRequestComplete(net::OK);
 }
 
-void ProxyingWebSocket::OnHeadersReceived(const std::string& headers,
-                                          const net::IPEndPoint& endpoint,
-                                          OnHeadersReceivedCallback callback) {
+void ProxyingWebSocket::OnHeadersReceived(
+    const std::string& headers,
+    const net::IPEndPoint& endpoint,
+    const std::optional<net::SSLInfo>& ssl_info,
+    OnHeadersReceivedCallback callback) {
   DCHECK(receiver_as_header_client_.is_bound());
 
   on_headers_received_callback_ = std::move(callback);
@@ -220,7 +222,7 @@ void ProxyingWebSocket::OnHeadersReceived(const std::string& headers,
 }
 
 void ProxyingWebSocket::StartProxying(
-    WebRequestAPI* web_request_api,
+    api::WebRequest* web_request,
     WebSocketFactory factory,
     const GURL& url,
     const net::SiteForCookies& site_for_cookies,
@@ -243,7 +245,7 @@ void ProxyingWebSocket::StartProxying(
   request.request_initiator = origin;
 
   auto* proxy = new ProxyingWebSocket(
-      web_request_api, std::move(factory), request, std::move(handshake_client),
+      web_request, std::move(factory), request, std::move(handshake_client),
       has_extra_headers, process_id, render_frame_id, browser_context,
       request_id_generator);
   proxy->Start();
@@ -263,8 +265,8 @@ void ProxyingWebSocket::OnBeforeRequestComplete(int error_code) {
                           weak_factory_.GetWeakPtr());
 
   info_.AddResponseInfoFromResourceResponse(*response_);
-  int result = web_request_api_->OnBeforeSendHeaders(
-      &info_, request_, continuation, &request_headers_);
+  int result = web_request_->OnBeforeSendHeaders(&info_, request_, continuation,
+                                                 &request_headers_);
 
   if (result == net::ERR_BLOCKED_BY_CLIENT) {
     OnError(result);
@@ -293,11 +295,11 @@ void ProxyingWebSocket::OnBeforeSendHeadersComplete(
   if (receiver_as_header_client_.is_bound()) {
     CHECK(on_before_send_headers_callback_);
     std::move(on_before_send_headers_callback_)
-        .Run(error_code, request_headers_);
+        .Run(error_code, request_headers_, std::nullopt);
   }
 
   info_.AddResponseInfoFromResourceResponse(*response_);
-  web_request_api_->OnSendHeaders(&info_, request_, request_headers_);
+  web_request_->OnSendHeaders(&info_, request_, request_headers_);
 
   if (!receiver_as_header_client_.is_bound())
     ContinueToStartRequest(net::OK);
@@ -367,25 +369,29 @@ void ProxyingWebSocket::OnHeadersReceivedComplete(int error_code) {
 
   ResumeIncomingMethodCallProcessing();
   info_.AddResponseInfoFromResourceResponse(*response_);
-  web_request_api_->OnResponseStarted(&info_, request_);
+  web_request_->OnResponseStarted(&info_, request_);
 
   if (!receiver_as_header_client_.is_bound())
     ContinueToCompleted();
 }
 
-void ProxyingWebSocket::OnAuthRequiredComplete(AuthRequiredResponse rv) {
+void ProxyingWebSocket::OnAuthRequiredComplete(
+    api::WebRequest::AuthRequiredResponse rv) {
   CHECK(auth_required_callback_);
   ResumeIncomingMethodCallProcessing();
   switch (rv) {
-    case AuthRequiredResponse::kNoAction:
-    case AuthRequiredResponse::kCancelAuth:
+    case api::WebRequest::AuthRequiredResponse::
+        AUTH_REQUIRED_RESPONSE_NO_ACTION:
+    case api::WebRequest::AuthRequiredResponse::
+        AUTH_REQUIRED_RESPONSE_CANCEL_AUTH:
       std::move(auth_required_callback_).Run(std::nullopt);
       break;
 
-    case AuthRequiredResponse::kSetAuth:
+    case api::WebRequest::AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_SET_AUTH:
       std::move(auth_required_callback_).Run(auth_credentials_);
       break;
-    case AuthRequiredResponse::kIoPending:
+    case api::WebRequest::AuthRequiredResponse::
+        AUTH_REQUIRED_RESPONSE_IO_PENDING:
       NOTREACHED();
   }
 }
@@ -402,8 +408,13 @@ void ProxyingWebSocket::OnHeadersReceivedCompleteForAuth(
 
   auto continuation = base::BindRepeating(
       &ProxyingWebSocket::OnAuthRequiredComplete, weak_factory_.GetWeakPtr());
-  auto auth_rv = AuthRequiredResponse::kIoPending;
+  auto auth_rv = web_request_->OnAuthRequired(
+      &info_, auth_info, std::move(continuation), &auth_credentials_);
   PauseIncomingMethodCallProcessing();
+  if (auth_rv == api::WebRequest::AuthRequiredResponse::
+                     AUTH_REQUIRED_RESPONSE_IO_PENDING) {
+    return;
+  }
 
   OnAuthRequiredComplete(auth_rv);
 }
@@ -425,7 +436,7 @@ void ProxyingWebSocket::ResumeIncomingMethodCallProcessing() {
 void ProxyingWebSocket::OnError(int error_code) {
   if (!is_done_) {
     is_done_ = true;
-    web_request_api_->OnErrorOccurred(&info_, request_, error_code);
+    web_request_->OnErrorOccurred(&info_, request_, error_code);
   }
 
   // Deletes |this|.

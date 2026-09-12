@@ -5,20 +5,21 @@
 #include <iomanip>
 #include <string_view>
 
-#include <dwmapi.h>
 #include <windows.devices.enumeration.h>
 #include <wrl/client.h>
 
 #include "shell/browser/api/electron_api_system_preferences.h"
 
 #include "base/containers/fixed_flat_map.h"
+#include "base/logging.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/windows_types.h"
 #include "base/win/wrapped_window_proc.h"
 #include "shell/common/color_util.h"
 #include "shell/common/process_util.h"
-#include "ui/gfx/color_utils.h"
+#include "skia/ext/skia_utils_win.h"
 #include "ui/gfx/win/hwnd_util.h"
+#include "ui/gfx/win/singleton_hwnd.h"
 
 namespace electron {
 
@@ -84,14 +85,12 @@ std::string hexColorDWORDToRGBA(DWORD color) {
 }
 
 std::string SystemPreferences::GetAccentColor() {
-  DWORD color = 0;
-  BOOL opaque = FALSE;
+  std::optional<DWORD> color = GetSystemAccentColor();
 
-  if (FAILED(DwmGetColorizationColor(&color, &opaque))) {
+  if (!color.has_value())
     return "";
-  }
 
-  return hexColorDWORDToRGBA(color);
+  return ToRGBAHex(skia::COLORREFToSkColor(color.value()), false);
 }
 
 std::string SystemPreferences::GetColor(gin_helper::ErrorThrower thrower,
@@ -130,7 +129,7 @@ std::string SystemPreferences::GetColor(gin_helper::ErrorThrower thrower,
   });
 
   if (auto iter = Lookup.find(color); iter != Lookup.end())
-    return ToRGBAHex(color_utils::GetSysSkColor(iter->second));
+    return ToRGBAHex(GetSysSkColor(iter->second));
 
   thrower.ThrowError("Unknown color: " + color);
   return "";
@@ -160,11 +159,13 @@ void SystemPreferences::InitializeWindow() {
   // Wait until app is ready before creating sys color listener
   // Creating this listener before the app is ready causes global shortcuts
   // to not fire
-  if (Browser::Get()->is_ready())
-    color_change_listener_ =
-        std::make_unique<gfx::ScopedSysColorChangeListener>(this);
-  else
+  if (Browser::Get()->is_ready()) {
+    hwnd_subscription_ =
+        gfx::SingletonHwnd::GetInstance()->RegisterCallback(base::BindRepeating(
+            &SystemPreferences::OnWndProc, base::Unretained(this)));
+  } else {
     Browser::Get()->AddObserver(this);
+  }
 
   WNDCLASSEX window_class;
   base::win::InitializeWindowClass(
@@ -178,8 +179,8 @@ void SystemPreferences::InitializeWindow() {
   // colorization color.  Create a hidden WS_POPUP window instead of an
   // HWND_MESSAGE window, because only top-level windows such as popups can
   // receive broadcast messages like "WM_DWMCOLORIZATIONCOLORCHANGED".
-  window_ = CreateWindow(MAKEINTATOM(atom_), 0, WS_POPUP, 0, 0, 0, 0, 0, 0,
-                         instance_, 0);
+  window_ = CreateWindow(MAKEINTATOM(atom_), nullptr, WS_POPUP, 0, 0, 0, 0,
+                         nullptr, nullptr, instance_, nullptr);
   gfx::CheckWindowCreated(window_, ::GetLastError());
   gfx::SetWindowUserData(window_, this);
 }
@@ -201,7 +202,7 @@ LRESULT CALLBACK SystemPreferences::WndProc(HWND hwnd,
                                             WPARAM wparam,
                                             LPARAM lparam) {
   if (message == WM_DWMCOLORIZATIONCOLORCHANGED) {
-    DWORD new_color = (DWORD)wparam;
+    DWORD new_color = static_cast<DWORD>(wparam);
     std::string new_color_string = hexColorDWORDToRGBA(new_color);
     if (new_color_string != current_color_) {
       Emit("accent-color-changed", hexColorDWORDToRGBA(new_color));
@@ -211,13 +212,39 @@ LRESULT CALLBACK SystemPreferences::WndProc(HWND hwnd,
   return ::DefWindowProc(hwnd, message, wparam, lparam);
 }
 
-void SystemPreferences::OnSysColorChange() {
+void SystemPreferences::OnWndProc(HWND hwnd,
+                                  UINT message,
+                                  WPARAM wparam,
+                                  LPARAM lparam) {
+  if (message != WM_SYSCOLORCHANGE &&
+      (message != WM_SETTINGCHANGE || wparam != SPI_SETHIGHCONTRAST)) {
+    return;
+  }
   Emit("color-changed");
 }
 
-void SystemPreferences::OnFinishLaunching(base::Value::Dict launch_info) {
-  color_change_listener_ =
-      std::make_unique<gfx::ScopedSysColorChangeListener>(this);
+void SystemPreferences::OnFinishLaunching(base::DictValue launch_info) {
+  hwnd_subscription_ =
+      gfx::SingletonHwnd::GetInstance()->RegisterCallback(base::BindRepeating(
+          &SystemPreferences::OnWndProc, base::Unretained(this)));
+  Browser::Get()->RemoveObserver(this);
+}
+
+void SystemPreferences::Dispose() {
+  if (electron::IsUtilityProcess())
+    return;
+
+  hwnd_subscription_ = {};
+  Browser::Get()->RemoveObserver(this);
+  if (window_) {
+    gfx::SetWindowUserData(window_, nullptr);
+    DestroyWindow(window_);
+    window_ = nullptr;
+  }
+  if (atom_) {
+    UnregisterClass(MAKEINTATOM(atom_), instance_);
+    atom_ = 0;
+  }
 }
 
 }  // namespace api

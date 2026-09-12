@@ -20,6 +20,7 @@ class ElectronDesktopWindowTreeHostWin : public views::DesktopWindowTreeHostWin,
  public:
   ElectronDesktopWindowTreeHostWin(
       NativeWindowViews* native_window_view,
+      views::Widget* widget,
       views::DesktopNativeWidgetAura* desktop_native_widget_aura);
   ~ElectronDesktopWindowTreeHostWin() override;
 
@@ -31,16 +32,24 @@ class ElectronDesktopWindowTreeHostWin : public views::DesktopWindowTreeHostWin,
 
  protected:
   // views::DesktopWindowTreeHostWin:
+  void OnWidgetInitDone() override;
+  bool ShouldUpdateWindowTransparency() const override;
   bool PreHandleMSG(UINT message,
                     WPARAM w_param,
                     LPARAM l_param,
                     LRESULT* result) override;
   bool ShouldPaintAsActive() const override;
   bool GetDwmFrameInsetsInPixels(gfx::Insets* insets) const override;
+  bool WidgetSizeIsClientSize() const override;
   bool GetClientAreaInsets(gfx::Insets* insets,
                            int frame_thickness) const override;
   bool HandleMouseEventForCaption(UINT message) const override;
   bool HandleMouseEvent(ui::MouseEvent* event) override;
+  bool HandleIMEMessage(UINT message,
+                        WPARAM w_param,
+                        LPARAM l_param,
+                        LRESULT* result) override;
+  void Restore() override;
 
   // ui::NativeThemeObserver:
   void OnNativeThemeUpdated(ui::NativeTheme* observed_theme) override;
@@ -49,6 +58,7 @@ class ElectronDesktopWindowTreeHostWin : public views::DesktopWindowTreeHostWin,
  private:
   raw_ptr<NativeWindowViews> native_window_view_;  // weak ref
   std::optional<bool> force_should_paint_as_active_;
+  bool widget_init_done_ = false;
 };
 
 }  // namespace electron

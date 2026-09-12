@@ -13,12 +13,12 @@
 #include "base/memory/raw_ptr.h"
 #include "gin/arguments.h"
 #include "gin/per_isolate_data.h"
-#include "shell/common/gin_helper/arguments.h"
+#include "gin/public/gin_embedders.h"
 #include "shell/common/gin_helper/destroyable.h"
 #include "shell/common/gin_helper/error_thrower.h"
-#include "shell/common/gin_helper/microtasks_scope.h"
-#include "v8/include/v8-context.h"
+#include "v8/include/cppgc/macros.h"
 #include "v8/include/v8-external.h"
+#include "v8/include/v8-microtask-queue.h"
 #include "v8/include/v8-template.h"
 
 // This file is forked from gin/function_template.h with 2 differences:
@@ -68,6 +68,13 @@ class CallbackHolderBase {
 
   v8::Local<v8::External> GetHandle(v8::Isolate* isolate);
 
+  // Frees the holders created in `isolate` when it has no gin::PerIsolateData,
+  // as a Node.js worker's isolate does. gin never reports the disposal of such
+  // an isolate, and V8 does not run weak callbacks when it disposes one, so
+  // without this the holders leak. Call it on the isolate's thread once no
+  // more JavaScript will run there.
+  static void DisposeAllInIsolateWithoutGin(v8::Isolate* isolate);
+
  protected:
   explicit CallbackHolderBase(v8::Isolate* isolate);
   virtual ~CallbackHolderBase();
@@ -81,6 +88,7 @@ class CallbackHolderBase {
 
     // gin::PerIsolateData::DisposeObserver
     void OnBeforeDispose(v8::Isolate* isolate) override;
+    void OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) override {}
     void OnDisposed() override;
 
    private:
@@ -98,6 +106,9 @@ class CallbackHolderBase {
 
   v8::Global<v8::External> v8_ref_;
   DisposeObserver dispose_observer_;
+
+  // Set while this holder is registered for DisposeAllInIsolateWithoutGin().
+  raw_ptr<v8::Isolate> isolate_without_gin_ = nullptr;
 };
 
 template <typename Sig>
@@ -153,15 +164,6 @@ inline bool GetNextArgument(gin::Arguments* args,
   return true;
 }
 
-// Electron-specific GetNextArgument that supports the gin_helper::Arguments.
-inline bool GetNextArgument(gin::Arguments* args,
-                            const InvokerOptions& invoker_options,
-                            bool is_first,
-                            gin_helper::Arguments** result) {
-  *result = static_cast<gin_helper::Arguments*>(args);
-  return true;
-}
-
 // For advanced use cases, we allow callers to request the unparsed Arguments
 // object and poke around in it directly.
 inline bool GetNextArgument(gin::Arguments* args,
@@ -198,6 +200,9 @@ void ThrowConversionError(gin::Arguments* args,
 // at position |index|.
 template <size_t index, typename ArgType, typename = void>
 struct ArgumentHolder {
+  CPPGC_STACK_ALLOCATED();
+
+ public:
   using ArgLocalType = typename CallbackParamTraits<ArgType>::LocalType;
 
   ArgLocalType value;
@@ -231,6 +236,9 @@ struct ArgumentHolder<
                      std::is_constructible_v<
                          typename CallbackParamTraits<ArgType>::LocalType,
                          v8::Isolate*>>> {
+  CPPGC_STACK_ALLOCATED();
+
+ public:
   using ArgLocalType = typename CallbackParamTraits<ArgType>::LocalType;
 
   ArgLocalType value;
@@ -269,9 +277,8 @@ class Invoker<std::index_sequence<indices...>, ArgTypes...>
   template <typename ReturnType>
   void DispatchToCallback(
       base::RepeatingCallback<ReturnType(ArgTypes...)> callback) {
-    gin_helper::MicrotasksScope microtasks_scope{
-        args_->GetHolderCreationContext(), true,
-        v8::MicrotasksScope::kRunMicrotasks};
+    v8::MicrotasksScope microtasks_scope(args_->GetHolderCreationContext(),
+                                         v8::MicrotasksScope::kRunMicrotasks);
     args_->Return(
         callback.Run(std::move(ArgumentHolder<indices, ArgTypes>::value)...));
   }
@@ -280,9 +287,8 @@ class Invoker<std::index_sequence<indices...>, ArgTypes...>
   // expression to foo. As a result, we must specialize the case of Callbacks
   // that have the void return type.
   void DispatchToCallback(base::RepeatingCallback<void(ArgTypes...)> callback) {
-    gin_helper::MicrotasksScope microtasks_scope{
-        args_->GetHolderCreationContext(), true,
-        v8::MicrotasksScope::kRunMicrotasks};
+    v8::MicrotasksScope microtasks_scope(args_->GetHolderCreationContext(),
+                                         v8::MicrotasksScope::kRunMicrotasks);
     callback.Run(std::move(ArgumentHolder<indices, ArgTypes>::value)...);
   }
 
@@ -300,8 +306,8 @@ struct Dispatcher<ReturnType(ArgTypes...)> {
   static void DispatchToCallbackImpl(gin::Arguments* args) {
     v8::Local<v8::External> v8_holder;
     CHECK(args->GetData(&v8_holder));
-    CallbackHolderBase* holder_base =
-        reinterpret_cast<CallbackHolderBase*>(v8_holder->Value());
+    CallbackHolderBase* holder_base = reinterpret_cast<CallbackHolderBase*>(
+        v8_holder->Value(v8::kExternalPointerTypeTagDefault));
 
     typedef CallbackHolder<ReturnType(ArgTypes...)> HolderT;
     HolderT* holder = static_cast<HolderT*>(holder_base);

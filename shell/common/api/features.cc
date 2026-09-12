@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
 #include "printing/buildflags/buildflags.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/node_includes.h"
@@ -25,8 +26,16 @@ bool IsPrintingEnabled() {
   return BUILDFLAG(ENABLE_PRINTING);
 }
 
+bool IsPromptAPIEnabled() {
+  return BUILDFLAG(ENABLE_PROMPT_API);
+}
+
 bool IsExtensionsEnabled() {
   return BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS);
+}
+
+bool IsRunAsNodeEnabled() {
+  return electron::fuses::IsRunAsNodeEnabled();
 }
 
 bool IsComponentBuild() {
@@ -41,13 +50,16 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.SetMethod("isBuiltinSpellCheckerEnabled", &IsBuiltinSpellCheckerEnabled);
   dict.SetMethod("isPDFViewerEnabled", &IsPDFViewerEnabled);
   dict.SetMethod("isFakeLocationProviderEnabled",
                  &IsFakeLocationProviderEnabled);
   dict.SetMethod("isPrintingEnabled", &IsPrintingEnabled);
+  dict.SetMethod("isPromptAPIEnabled", &IsPromptAPIEnabled);
   dict.SetMethod("isComponentBuild", &IsComponentBuild);
+  dict.SetMethod("isRunAsNodeEnabled", &IsRunAsNodeEnabled);
   dict.SetMethod("isExtensionsEnabled", &IsExtensionsEnabled);
 }
 

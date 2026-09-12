@@ -5,6 +5,7 @@
 #include "shell/browser/api/electron_api_web_request.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,18 +14,26 @@
 #include "base/memory/raw_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
+#include "content/public/browser/web_contents.h"
 #include "extensions/browser/api/web_request/web_request_info.h"
-#include "extensions/browser/api/web_request/web_request_resource_type.h"
+#include "extensions/browser/extension_navigation_ui_data.h"
+#include "extensions/common/api/web_request/web_request_resource_type.h"
 #include "extensions/common/url_pattern.h"
 #include "gin/converter.h"
 #include "gin/dictionary.h"
-#include "gin/handle.h"
 #include "gin/object_template_builder.h"
+#include "gin/persistent.h"
+#include "net/url_request/redirect_info.h"
+#include "services/network/public/cpp/url_loader_completion_status.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 #include "shell/browser/api/electron_api_session.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
+#include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/javascript_environment.h"
+#include "shell/browser/login_handler.h"
+#include "shell/browser/net/url_loader_factory_gate.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/frame_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
@@ -32,6 +41,7 @@
 #include "shell/common/gin_converters/std_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_util.h"
 
 static constexpr auto ResourceTypes =
@@ -71,14 +81,6 @@ namespace electron::api {
 
 namespace {
 
-const char kUserDataKey[] = "WebRequest";
-
-// BrowserContext <=> WebRequest relationship.
-struct UserData : public base::SupportsUserData::Data {
-  explicit UserData(WebRequest* data) : data(data) {}
-  raw_ptr<WebRequest> data;
-};
-
 extensions::WebRequestResourceType ParseResourceType(std::string_view value) {
   if (auto iter = ResourceTypes.find(value); iter != ResourceTypes.end())
     return iter->second;
@@ -93,7 +95,7 @@ extensions::WebRequestResourceType ParseResourceType(std::string_view value) {
 // to pass the original keys.
 v8::Local<v8::Value> HttpResponseHeadersToV8(
     net::HttpResponseHeaders* headers) {
-  base::Value::Dict response_headers;
+  base::DictValue response_headers;
   if (headers) {
     size_t iter = 0;
     std::string key;
@@ -107,7 +109,7 @@ v8::Local<v8::Value> HttpResponseHeadersToV8(
 
 // Overloaded by multiple types to fill the |details| object.
 void ToDictionary(gin_helper::Dictionary* details,
-                  extensions::WebRequestInfo* info) {
+                  const extensions::WebRequestInfo* info) {
   details->Set("id", info->id);
   details->Set("url", info->url);
   details->Set("method", info->method);
@@ -116,6 +118,11 @@ void ToDictionary(gin_helper::Dictionary* details,
   details->Set("resourceType", info->web_request_type);
   if (!info->response_ip.empty())
     details->Set("ip", info->response_ip);
+  // The origin that issued the request (Chrome's webRequest `initiator`). It
+  // is kept from the original request across redirects and, unlike
+  // `referrer`, is not under the requesting document's control.
+  if (info->initiator)
+    details->Set("initiatorOrigin", info->initiator->Serialize());
   if (info->response_headers) {
     details->Set("fromCache", info->response_from_cache);
     details->Set("statusLine", info->response_headers->GetStatusLine());
@@ -124,8 +131,7 @@ void ToDictionary(gin_helper::Dictionary* details,
                  HttpResponseHeadersToV8(info->response_headers.get()));
   }
 
-  auto* render_frame_host = content::RenderFrameHost::FromID(
-      info->render_process_id, info->frame_routing_id);
+  auto* render_frame_host = content::RenderFrameHost::FromID(info->global_id);
   if (render_frame_host) {
     details->SetGetter("frame", render_frame_host);
     auto* web_contents =
@@ -206,9 +212,19 @@ CalculateOnBeforeSendHeadersDelta(const net::HttpRequestHeaders* old_headers,
   return std::make_pair(modified_request_headers, deleted_request_headers);
 }
 
+WebRequest* ForObservedRequest(
+    const base::WeakPtr<ElectronBrowserContext>& browser_context) {
+  if (!browser_context)
+    return nullptr;
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope scope(isolate);
+  return WebRequest::FromOrCreate(isolate, browser_context.get());
+}
+
 }  // namespace
 
-gin::WrapperInfo WebRequest::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo WebRequest::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronWebRequest);
 
 WebRequest::RequestFilter::RequestFilter(
     std::set<URLPattern> include_url_patterns,
@@ -254,11 +270,20 @@ bool WebRequest::RequestFilter::MatchesType(
 }
 
 bool WebRequest::RequestFilter::MatchesRequest(
-    extensions::WebRequestInfo* info) const {
+    const extensions::WebRequestInfo* info) const {
   // Matches URL and type, and does not match exclude URL.
   return MatchesURL(info->url, include_url_patterns_) &&
          !MatchesURL(info->url, exclude_url_patterns_) &&
          MatchesType(info->web_request_type);
+}
+
+uint32_t WebRequest::RequestFilter::TypeMask() const {
+  if (types_.empty())
+    return kAllResourceTypes;
+  uint32_t mask = 0;
+  for (auto type : types_)
+    mask |= 1u << static_cast<int>(type);
+  return mask;
 }
 
 void WebRequest::RequestFilter::AddUrlPatterns(
@@ -286,6 +311,10 @@ struct WebRequest::BlockedRequest {
   net::CompletionOnceCallback callback;
   // Only used for onBeforeSendHeaders.
   BeforeSendHeadersCallback before_send_headers_callback;
+  // The callback to invoke for auth. If |auth_callback.is_null()| is false,
+  // |callback| must be NULL.
+  // Only valid for OnAuthRequired.
+  AuthCallback auth_callback;
   // Only used for onBeforeSendHeaders.
   raw_ptr<net::HttpRequestHeaders> request_headers = nullptr;
   // Only used for onHeadersReceived.
@@ -296,6 +325,8 @@ struct WebRequest::BlockedRequest {
   std::string status_line;
   // Only used for onBeforeRequest.
   raw_ptr<GURL> new_url = nullptr;
+  // Owns the LoginHandler while waiting for auth credentials.
+  std::unique_ptr<LoginHandler> login_handler;
 };
 
 WebRequest::SimpleListenerInfo::SimpleListenerInfo(RequestFilter filter_,
@@ -311,15 +342,10 @@ WebRequest::ResponseListenerInfo::ResponseListenerInfo(
 WebRequest::ResponseListenerInfo::ResponseListenerInfo() = default;
 WebRequest::ResponseListenerInfo::~ResponseListenerInfo() = default;
 
-WebRequest::WebRequest(v8::Isolate* isolate,
-                       content::BrowserContext* browser_context)
-    : browser_context_(browser_context) {
-  browser_context_->SetUserData(kUserDataKey, std::make_unique<UserData>(this));
-}
-
-WebRequest::~WebRequest() {
-  browser_context_->RemoveUserData(kUserDataKey);
-}
+WebRequest::WebRequest(base::PassKey<Session>,
+                       base::WeakPtr<ElectronBrowserContext> browser_context)
+    : browser_context_{std::move(browser_context)} {}
+WebRequest::~WebRequest() = default;
 
 gin::ObjectTemplateBuilder WebRequest::GetObjectTemplateBuilder(
     v8::Isolate* isolate) {
@@ -346,8 +372,17 @@ gin::ObjectTemplateBuilder WebRequest::GetObjectTemplateBuilder(
                  &WebRequest::SetSimpleListener<SimpleEvent::kOnCompleted>);
 }
 
-const char* WebRequest::GetTypeName() {
-  return GetClassName();
+const gin::WrapperInfo* WebRequest::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* WebRequest::GetHumanReadableName() const {
+  return "Electron / WebRequest";
+}
+
+void WebRequest::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<WebRequest>::Trace(visitor);
+  visitor->Trace(weak_factory_);
 }
 
 bool WebRequest::HasListener() const {
@@ -385,20 +420,22 @@ int WebRequest::HandleOnBeforeRequestResponseEvent(
   gin_helper::Dictionary details(isolate, v8::Object::New(isolate));
   FillDetails(&details, request_info, request, *new_url);
 
-  ResponseCallback response =
-      base::BindOnce(&WebRequest::OnBeforeRequestListenerResult,
-                     base::Unretained(this), request_info->id);
+  auto& allocation_handle = isolate->GetCppHeap()->GetAllocationHandle();
+  ResponseCallback response = base::BindOnce(
+      &WebRequest::OnBeforeRequestListenerResult,
+      gin::WrapPersistent(weak_factory_.GetWeakCell(allocation_handle)),
+      request_info->id);
   info.listener.Run(gin::ConvertToV8(isolate, details), std::move(response));
   return net::ERR_IO_PENDING;
 }
 
 void WebRequest::OnBeforeRequestListenerResult(uint64_t id,
                                                v8::Local<v8::Value> response) {
-  const auto iter = blocked_requests_.find(id);
-  if (iter == std::end(blocked_requests_))
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
     return;
 
-  auto& request = iter->second;
+  auto& request = nh.mapped();
 
   int result = net::OK;
   if (response->IsObject()) {
@@ -416,7 +453,6 @@ void WebRequest::OnBeforeRequestListenerResult(uint64_t id,
 
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(request.callback), result));
-  blocked_requests_.erase(iter);
 }
 
 int WebRequest::OnBeforeSendHeaders(extensions::WebRequestInfo* info,
@@ -461,11 +497,11 @@ int WebRequest::HandleOnBeforeSendHeadersResponseEvent(
 void WebRequest::OnBeforeSendHeadersListenerResult(
     uint64_t id,
     v8::Local<v8::Value> response) {
-  const auto iter = blocked_requests_.find(id);
-  if (iter == std::end(blocked_requests_))
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
     return;
 
-  auto& request = iter->second;
+  auto& request = nh.mapped();
 
   net::HttpRequestHeaders* old_headers = request.request_headers;
   net::HttpRequestHeaders new_headers;
@@ -503,7 +539,6 @@ void WebRequest::OnBeforeSendHeadersListenerResult(
       FROM_HERE,
       base::BindOnce(std::move(request.before_send_headers_callback),
                      updated_headers.first, updated_headers.second, result));
-  blocked_requests_.erase(iter);
 }
 
 int WebRequest::OnHeadersReceived(
@@ -555,11 +590,11 @@ int WebRequest::HandleOnHeadersReceivedResponseEvent(
 void WebRequest::OnHeadersReceivedListenerResult(
     uint64_t id,
     v8::Local<v8::Value> response) {
-  const auto iter = blocked_requests_.find(id);
-  if (iter == std::end(blocked_requests_))
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
     return;
 
-  auto& request = iter->second;
+  auto& request = nh.mapped();
 
   int result = net::OK;
   bool user_modified_headers = false;
@@ -592,13 +627,43 @@ void WebRequest::OnHeadersReceivedListenerResult(
 
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(request.callback), result));
-  blocked_requests_.erase(iter);
 }
 
 void WebRequest::OnSendHeaders(extensions::WebRequestInfo* info,
                                const network::ResourceRequest& request,
                                const net::HttpRequestHeaders& headers) {
   HandleSimpleEvent(SimpleEvent::kOnSendHeaders, info, request, headers);
+}
+
+WebRequest::AuthRequiredResponse WebRequest::OnAuthRequired(
+    const extensions::WebRequestInfo* request_info,
+    const net::AuthChallengeInfo& auth_info,
+    WebRequest::AuthCallback callback,
+    net::AuthCredentials* credentials) {
+  content::RenderFrameHost* rfh =
+      content::RenderFrameHost::FromID(request_info->global_id);
+  content::WebContents* web_contents = nullptr;
+  if (rfh)
+    web_contents = content::WebContents::FromRenderFrameHost(rfh);
+
+  BlockedRequest blocked_request;
+  blocked_request.auth_callback = std::move(callback);
+  blocked_requests_[request_info->id] = std::move(blocked_request);
+
+  auto login_callback =
+      base::BindOnce(&WebRequest::OnLoginAuthResult, base::Unretained(this),
+                     request_info->id, credentials);
+
+  scoped_refptr<net::HttpResponseHeaders> response_headers =
+      request_info->response_headers;
+  blocked_requests_[request_info->id].login_handler =
+      std::make_unique<LoginHandler>(
+          auth_info, web_contents,
+          static_cast<base::ProcessId>(
+              request_info->global_id.child_id.GetUnsafeValue()),
+          request_info->url, response_headers, std::move(login_callback));
+
+  return AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_IO_PENDING;
 }
 
 void WebRequest::OnBeforeRedirect(extensions::WebRequestInfo* info,
@@ -709,6 +774,135 @@ void WebRequest::SetListener(Event event,
     listeners->erase(event);
   else
     (*listeners)[event] = {std::move(filter), std::move(listener)};
+  UpdateInterceptState();
+}
+
+void WebRequest::UpdateInterceptState() {
+  if (!browser_context_)
+    return;
+  uint32_t blocking = 0, observers = 0;
+  for (const auto& [event, info] : response_listeners_)
+    blocking |= info.filter.TypeMask();
+  for (const auto& [event, info] : simple_listeners_)
+    observers |= info.filter.TypeMask();
+  browser_context_->intercept_state()->SetListenerTypes(blocking, observers);
+}
+
+struct WebRequest::ObservedRequest {
+  ObservedRequest(uint64_t id,
+                  content::GlobalRenderFrameHostId frame,
+                  const network::ResourceRequest& request)
+      : id(id), frame(frame), request(request) {
+    RebuildInfo();
+  }
+
+  // WebRequestInfo is immutable; like ProxyingURLLoaderFactory, build a fresh
+  // one (same id) when a redirect changes the request.
+  void RebuildInfo() {
+    info = std::make_unique<extensions::WebRequestInfo>(
+        extensions::WebRequestInfoInitParams(
+            id, frame, nullptr, request, /*is_download=*/false,
+            /*is_async=*/true, /*is_service_worker_script=*/false,
+            /*navigation_id=*/std::nullopt));
+  }
+
+  const uint64_t id;
+  const content::GlobalRenderFrameHostId frame;
+  network::ResourceRequest request;
+  std::unique_ptr<extensions::WebRequestInfo> info;
+};
+
+// static
+void WebRequest::ObservedRequestStarted(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    int render_process_id,
+    int frame_routing_id,
+    const network::ResourceRequest& request) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto observed = std::make_unique<ObservedRequest>(
+      ElectronBrowserClient::Get()->NextWebRequestId(),
+      content::GlobalRenderFrameHostId(render_process_id, frame_routing_id),
+      request);
+  auto& entry = *observed;
+  self->observed_requests_.emplace(key, std::move(observed));
+  self->OnSendHeaders(entry.info.get(), entry.request, entry.request.headers);
+}
+
+// static
+void WebRequest::ObservedRequestRedirected(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const net::RedirectInfo& redirect_info,
+    network::mojom::URLResponseHeadPtr head) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.info->AddResponseInfoFromResourceResponse(*head);
+  self->OnBeforeRedirect(observed.info.get(), observed.request,
+                         redirect_info.new_url);
+}
+
+// static
+void WebRequest::ObservedRequestFollowedRedirect(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const network::ResourceRequest& request) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.request = request;
+  observed.RebuildInfo();
+  self->OnSendHeaders(observed.info.get(), observed.request,
+                      observed.request.headers);
+}
+
+// static
+void WebRequest::ObservedRequestResponded(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    network::mojom::URLResponseHeadPtr head) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.info->AddResponseInfoFromResourceResponse(*head);
+  self->OnResponseStarted(observed.info.get(), observed.request);
+}
+
+// static
+void WebRequest::ObservedRequestFinished(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const network::URLLoaderCompletionStatus& status) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  auto observed = std::move(it->second);
+  self->observed_requests_.erase(it);
+  if (status.error_code == net::OK)
+    self->OnCompleted(observed->info.get(), observed->request,
+                      status.error_code);
+  else
+    self->OnErrorOccurred(observed->info.get(), observed->request,
+                          status.error_code);
+  self->OnRequestWillBeDestroyed(observed->info.get());
 }
 
 template <typename... Args>
@@ -730,43 +924,38 @@ void WebRequest::HandleSimpleEvent(SimpleEvent event,
   info.listener.Run(gin::ConvertToV8(isolate, details));
 }
 
-// static
-gin::Handle<WebRequest> WebRequest::FromOrCreate(
-    v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  gin::Handle<WebRequest> handle = From(isolate, browser_context);
-  if (handle.IsEmpty()) {
-    // Make sure the |Session| object has the |webRequest| property created.
-    v8::Local<v8::Value> web_request =
-        Session::CreateFrom(
-            isolate, static_cast<ElectronBrowserContext*>(browser_context))
-            ->WebRequest(isolate);
-    gin::ConvertFromV8(isolate, web_request, &handle);
+void WebRequest::OnLoginAuthResult(
+    uint64_t id,
+    net::AuthCredentials* credentials,
+    const std::optional<net::AuthCredentials>& maybe_creds) {
+  auto nh = blocked_requests_.extract(id);
+  CHECK(nh);
+
+  AuthRequiredResponse action =
+      AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_NO_ACTION;
+  if (maybe_creds.has_value()) {
+    *credentials = maybe_creds.value();
+    action = AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_SET_AUTH;
   }
-  DCHECK(!handle.IsEmpty());
-  return handle;
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(nh.mapped().auth_callback), action));
 }
 
 // static
-gin::Handle<WebRequest> WebRequest::Create(
-    v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  DCHECK(From(isolate, browser_context).IsEmpty())
-      << "WebRequest already created";
-  return gin::CreateHandle(isolate, new WebRequest(isolate, browser_context));
+WebRequest* WebRequest::FromOrCreate(v8::Isolate* isolate,
+                                     content::BrowserContext* browser_context) {
+  return Session::FromOrCreate(isolate, browser_context)->WebRequest(isolate);
 }
 
 // static
-gin::Handle<WebRequest> WebRequest::From(
+WebRequest* WebRequest::Create(
     v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  if (!browser_context)
-    return {};
-  auto* user_data =
-      static_cast<UserData*>(browser_context->GetUserData(kUserDataKey));
-  if (!user_data)
-    return {};
-  return gin::CreateHandle(isolate, user_data->data.get());
+    base::PassKey<Session> passkey,
+    base::WeakPtr<ElectronBrowserContext> browser_context) {
+  return cppgc::MakeGarbageCollected<WebRequest>(
+      isolate->GetCppHeap()->GetAllocationHandle(), std::move(passkey),
+      std::move(browser_context));
 }
 
 }  // namespace electron::api

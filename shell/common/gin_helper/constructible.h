@@ -5,6 +5,9 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
 
+#include <memory>
+
+#include "gin/per_context_data.h"
 #include "gin/per_isolate_data.h"
 #include "shell/common/gin_helper/event_emitter_template.h"
 #include "shell/common/gin_helper/function_template_extensions.h"
@@ -17,20 +20,20 @@ class EventEmitterMixin;
 // Helper class for Wrappable objects which should be constructible with 'new'
 // in JavaScript.
 //
-// To use, inherit from gin::Wrappable and gin_helper::Constructible, and
+// To use, inherit from gin_helper::Wrappable and gin_helper::Constructible, and
 // define the static methods New and FillObjectTemplate:
 //
-//   class Example : public gin::Wrappable<Example>,
+//   class Example : public gin_helper::DeprecatedWrappable<Example>,
 //                   public gin_helper::Constructible<Example> {
 //    public:
-//     static gin::Handle<Example> New(...usual gin method arguments...);
+//     static gin_helper::Handle<Example> New(...usual gin method arguments...);
 //     static void FillObjectTemplate(
 //         v8::Isolate*,
 //         v8::Local<v8::ObjectTemplate>);
 //   }
 //
-// Do NOT define the usual gin::Wrappable::GetObjectTemplateBuilder. It will
-// not be called for Constructible classes.
+// Do NOT define the usual gin_helper::Wrappable::GetObjectTemplateBuilder. It
+// will not be called for Constructible classes.
 //
 // To expose the constructor, call GetConstructor:
 //
@@ -40,15 +43,18 @@ template <typename T>
 class Constructible {
  public:
   static v8::Local<v8::Function> GetConstructor(
+      v8::Isolate* const isolate,
       v8::Local<v8::Context> context) {
-    v8::Isolate* isolate = context->GetIsolate();
     gin::PerIsolateData* data = gin::PerIsolateData::From(isolate);
-    auto* wrapper_info = &T::kWrapperInfo;
+    auto* const wrapper_info = &T::kWrapperInfo;
     v8::Local<v8::FunctionTemplate> constructor =
-        data->GetFunctionTemplate(wrapper_info);
+        data->DeprecatedGetFunctionTemplate(wrapper_info);
     if (constructor.IsEmpty()) {
-      constructor = gin::CreateConstructorFunctionTemplate(
-          isolate, base::BindRepeating(&T::New));
+      if (!gin::CreateConstructorFunctionTemplate(isolate,
+                                                  base::BindRepeating(&T::New))
+               .ToLocal(&constructor)) {
+        return {};
+      }
       if (std::is_base_of<EventEmitterMixin<T>, T>::value) {
         constructor->Inherit(
             gin_helper::internal::GetEventEmitterTemplate(isolate));
@@ -57,11 +63,59 @@ class Constructible {
           gin::kNumberOfInternalFields);
       constructor->SetClassName(gin::StringToV8(isolate, T::GetClassName()));
       T::FillObjectTemplate(isolate, constructor->PrototypeTemplate());
-      data->SetObjectTemplate(wrapper_info, constructor->InstanceTemplate());
-      data->SetFunctionTemplate(wrapper_info, constructor);
+      data->DeprecatedSetObjectTemplate(wrapper_info,
+                                        constructor->InstanceTemplate());
+      data->DeprecatedSetFunctionTemplate(wrapper_info, constructor);
     }
     return constructor->GetFunction(context).ToLocalChecked();
   }
+
+  static v8::Local<v8::Function> GetConstructor(
+      v8::Isolate* const isolate,
+      v8::Local<v8::Context> context,
+      const gin::WrapperInfo* const wrapper_info) {
+    gin::PerContextData* data = gin::PerContextData::From(context);
+    CHECK(data);
+
+    auto* constructor_data = static_cast<PerContextConstructorData*>(
+        data->GetUserData(wrapper_info));
+    if (constructor_data) {
+      return constructor_data->function_template.Get(isolate)
+          ->GetFunction(context)
+          .ToLocalChecked();
+    }
+
+    v8::Local<v8::FunctionTemplate> constructor;
+    if (!gin::CreateConstructorFunctionTemplate(isolate,
+                                                base::BindRepeating(&T::New))
+             .ToLocal(&constructor)) {
+      return {};
+    }
+    if (std::is_base_of<EventEmitterMixin<T>, T>::value) {
+      constructor->Inherit(
+          gin_helper::internal::GetEventEmitterTemplate(isolate));
+    }
+    constructor->InstanceTemplate()->SetInternalFieldCount(
+        gin::kNumberOfInternalFields);
+    constructor->SetClassName(gin::StringToV8(isolate, T::GetClassName()));
+    T::FillObjectTemplate(isolate, constructor->PrototypeTemplate());
+
+    data->SetObjectTemplate(wrapper_info, constructor->InstanceTemplate());
+    data->SetUserData(wrapper_info, std::make_unique<PerContextConstructorData>(
+                                        isolate, constructor));
+
+    return constructor->GetFunction(context).ToLocalChecked();
+  }
+
+ private:
+  class PerContextConstructorData : public base::SupportsUserData::Data {
+   public:
+    PerContextConstructorData(v8::Isolate* isolate,
+                              v8::Local<v8::FunctionTemplate> function_template)
+        : function_template(isolate, function_template) {}
+
+    v8::Global<v8::FunctionTemplate> function_template;
+  };
 };
 
 }  // namespace gin_helper

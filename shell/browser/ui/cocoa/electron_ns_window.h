@@ -7,8 +7,6 @@
 
 #include "base/memory/raw_ptr.h"
 #include "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
-#include "shell/browser/ui/cocoa/event_dispatching_window.h"
-#include "ui/views/widget/native_widget_mac.h"
 
 namespace electron {
 
@@ -29,8 +27,6 @@ class ScopedDisableResize {
 
 }  // namespace electron
 
-class ElectronNativeWindowObserver;
-
 @interface ElectronNSWindow : NativeWidgetMacNSWindow {
  @private
   raw_ptr<electron::NativeWindowMac> shell_;
@@ -40,7 +36,6 @@ class ElectronNativeWindowObserver;
 @property BOOL disableAutoHideCursor;
 @property BOOL disableKeyOrMainWindow;
 @property(nonatomic, retain) NSVisualEffectView* vibrantView;
-@property(nonatomic, retain) NSImage* cornerMask;
 - (id)initWithShell:(electron::NativeWindowMac*)shell
           styleMask:(NSUInteger)styleMask;
 - (void)cleanup;
@@ -48,7 +43,6 @@ class ElectronNativeWindowObserver;
 - (id)accessibilityFocusedUIElement;
 - (NSRect)originalContentRectForFrameRect:(NSRect)frameRect;
 - (BOOL)toggleFullScreenMode:(id)sender;
-- (NSImage*)_cornerMask;
 - (void)disableHeadlessMode;
 @end
 

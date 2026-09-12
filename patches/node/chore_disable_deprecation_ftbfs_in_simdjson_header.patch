@@ -8,13 +8,16 @@ Without this patch, building with simdjson fails with
 > error: identifier '_padded' preceded by whitespace in a literal operator
 > declaration is deprecated [-Werror,-Wdeprecated-literal-operator]
 
+and
+> error: declaration requires an exit-time destructor [-Werror,-Wexit-time-destructors]
+
 This patch can be removed once this is fixed upstream in simdjson.
 
 diff --git a/deps/simdjson/simdjson.h b/deps/simdjson/simdjson.h
-index c1535ee81300b9cb93eb9ee6e769246793f936c3..3350287401e181e1d4ee432b8bd16081d0d7a73e 100644
+index afcca85ad6bf7835f8f914d9d417f8347ad3db5c..a836ca8cfdb2fa7348ef7c2cf9c21f18ade5707b 100644
 --- a/deps/simdjson/simdjson.h
 +++ b/deps/simdjson/simdjson.h
-@@ -3837,12 +3837,17 @@ inline std::ostream& operator<<(std::ostream& out, simdjson_result<padded_string
+@@ -4408,12 +4408,17 @@ private:
  
  } // namespace simdjson
  
@@ -32,7 +35,7 @@ index c1535ee81300b9cb93eb9ee6e769246793f936c3..3350287401e181e1d4ee432b8bd16081
  namespace simdjson {
  namespace internal {
  
-@@ -4242,6 +4247,9 @@ inline simdjson_result<padded_string> padded_string::load(std::string_view filen
+@@ -5115,6 +5120,9 @@ simdjson_inline bool padded_memory_map::is_valid() const noexcept {
  
  } // namespace simdjson
  
@@ -42,12 +45,46 @@ index c1535ee81300b9cb93eb9ee6e769246793f936c3..3350287401e181e1d4ee432b8bd16081
  inline simdjson::padded_string operator ""_padded(const char *str, size_t len) {
    return simdjson::padded_string(str, len);
  }
-@@ -4250,6 +4258,8 @@ inline simdjson::padded_string operator ""_padded(const char8_t *str, size_t len
-   return simdjson::padded_string(reinterpret_cast<const char8_t *>(str), len);
+@@ -5123,6 +5131,8 @@ inline simdjson::padded_string operator ""_padded(const char8_t *str, size_t len
+   return simdjson::padded_string(reinterpret_cast<const char *>(str), len);
  }
  #endif
 +#pragma clang diagnostic pop
 +
+ 
  #endif // SIMDJSON_PADDED_STRING_INL_H
  /* end file simdjson/padded_string-inl.h */
- /* skipped duplicate #include "simdjson/padded_string_view.h" */
+@@ -72764,12 +72774,16 @@ simdjson_inline simdjson_warn_unused std::unique_ptr<ondemand::parser>& parser::
+   return parser_instance;
+ }
+ 
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wexit-time-destructors"
++
+ simdjson_inline simdjson_warn_unused std::unique_ptr<ondemand::parser>& parser::get_threadlocal_parser_if_exists() {
+   // @the-moisrex points out that this could be implemented with std::optional (C++17).
+   thread_local std::unique_ptr<ondemand::parser> parser_instance = nullptr;
+   return parser_instance;
+ }
+ 
++#pragma clang diagnostic pop
+ 
+ } // namespace ondemand
+ } // namespace arm64
+@@ -86146,12 +86160,16 @@ simdjson_inline simdjson_warn_unused std::unique_ptr<ondemand::parser>& parser::
+   return parser_instance;
+ }
+ 
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wexit-time-destructors"
++
+ simdjson_inline simdjson_warn_unused std::unique_ptr<ondemand::parser>& parser::get_threadlocal_parser_if_exists() {
+   // @the-moisrex points out that this could be implemented with std::optional (C++17).
+   thread_local std::unique_ptr<ondemand::parser> parser_instance = nullptr;
+   return parser_instance;
+ }
+ 
++#pragma clang diagnostic pop
+ 
+ } // namespace ondemand
+ } // namespace fallback

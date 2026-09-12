@@ -56,11 +56,6 @@ static NSDictionary* UNNotificationResponseToNSDictionary(
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification*)notify {
-  // Don't add the "Enter Full Screen" menu item automatically.
-  [[NSUserDefaults standardUserDefaults]
-      setBool:NO
-       forKey:@"NSFullScreenMenuItemEverywhere"];
-
   [[[NSWorkspace sharedWorkspace] notificationCenter]
       addObserver:self
          selector:@selector(willPowerOff:)
@@ -114,7 +109,14 @@ static NSDictionary* UNNotificationResponseToNSDictionary(
 }
 
 - (NSMenu*)applicationDockMenu:(NSApplication*)sender {
-  return menu_controller_ ? menu_controller_.menu : nil;
+  if (!menu_controller_)
+    return nil;
+
+  // Manually refresh menu state since menuWillOpen: is not called
+  // by macOS for dock menus for some reason before they are displayed.
+  NSMenu* menu = menu_controller_.menu;
+  [menu_controller_ refreshMenuTree:menu];
+  return menu;
 }
 
 - (BOOL)application:(NSApplication*)sender openFile:(NSString*)filename {
@@ -139,16 +141,14 @@ static NSDictionary* UNNotificationResponseToNSDictionary(
 #endif
               restorationHandler {
   std::string activity_type(base::SysNSStringToUTF8(userActivity.activityType));
-  NSURL* url = userActivity.webpageURL;
-  NSDictionary* details = url ? @{@"webpageURL" : url.absoluteString} : @{};
-  if (!userActivity.userInfo)
-    return NO;
+  NSString* webpage_url = userActivity.webpageURL.absoluteString;
+  NSDictionary* details = webpage_url ? @{@"webpageURL" : webpage_url} : @{};
+  NSDictionary* user_info = userActivity.userInfo ?: @{};
 
   electron::Browser* browser = electron::Browser::Get();
-  return browser->ContinueUserActivity(
-             activity_type,
-             electron::NSDictionaryToValue(userActivity.userInfo),
-             electron::NSDictionaryToValue(details))
+  return browser->ContinueUserActivity(activity_type,
+                                       electron::NSDictionaryToValue(user_info),
+                                       electron::NSDictionaryToValue(details))
              ? YES
              : NO;
 }
@@ -201,10 +201,8 @@ static NSDictionary* UNNotificationResponseToNSDictionary(
 
 - (void)application:(NSApplication*)application
     didReceiveRemoteNotification:(NSDictionary*)userInfo {
-  electron::api::PushNotifications* push_notifications =
-      electron::api::PushNotifications::Get();
-  if (push_notifications) {
-    electron::api::PushNotifications::Get()->OnDidReceiveAPNSNotification(
+  if (auto* push_notifications = electron::api::PushNotifications::Get()) {
+    push_notifications->OnDidReceiveAPNSNotification(
         electron::NSDictionaryToValue(userInfo));
   }
 }

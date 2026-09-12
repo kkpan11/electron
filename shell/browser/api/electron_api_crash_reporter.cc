@@ -19,8 +19,9 @@
 #include "components/upload_list/crash_upload_list.h"
 #include "components/upload_list/text_log_upload_list.h"
 #include "electron/mas.h"
-#include "gin/arguments.h"
+#include "gin/converter.h"
 #include "gin/data_object_builder.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
@@ -168,6 +169,10 @@ void Start(const std::string& submit_url,
 #elif BUILDFLAG(IS_WIN)
   for (const auto& pair : extra)
     electron::crash_keys::SetCrashKey(pair.first, pair.second);
+  // Make electron_wer.dll loadable by Windows Error Reporting for this user
+  // before crashpad registers it, so crashes that bypass the in-process
+  // handler (__fastfail etc.) still produce a minidump.
+  ElectronCrashReporterClient::RegisterWerHelperModuleForCurrentUser();
   base::FilePath user_data_dir;
   base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
   ::crash_reporter::InitializeCrashpadWithEmbeddedHandler(
@@ -261,7 +266,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict(isolate, exports);
   dict.SetMethod("start", &electron::api::crash_reporter::Start);
 #if IS_MAS_BUILD()
   dict.SetMethod("addExtraParameter", &electron::api::crash_reporter::NoOp);

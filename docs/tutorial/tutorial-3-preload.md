@@ -1,6 +1,6 @@
 ---
 title: 'Using Preload Scripts'
-description: 'This guide will step you through the process of creating a barebones Hello World app in Electron, similar to electron/electron-quick-start.'
+description: 'This guide will step you through the process of creating a barebones Hello World app in Electron.'
 slug: tutorial-preload
 hide_title: false
 ---
@@ -83,6 +83,7 @@ To attach this script to your renderer process, pass its path to the
 
 ```js {2,8-10} title="main.js"
 const { app, BrowserWindow } = require('electron')
+
 const path = require('node:path')
 
 const createWindow = () => {
@@ -130,15 +131,15 @@ and attach your `renderer.js` script:
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8">
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <meta
       http-equiv="X-Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <title>Hello from Electron renderer!</title>
   </head>
   <body>
@@ -204,6 +205,7 @@ you send out the `invoke` call from the renderer.
 
 ```js {1,15} title="main.js"
 const { app, BrowserWindow, ipcMain } = require('electron/main')
+
 const path = require('node:path')
 
 const createWindow = () => {

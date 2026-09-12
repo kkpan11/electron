@@ -6,38 +6,68 @@
 
 #include <string>
 
-#include "content/public/browser/browser_task_traits.h"
+#include "base/no_destructor.h"
 #include "content/public/browser/browser_thread.h"
-#include "gin/handle.h"
+#include "gin/persistent.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/gin_converters/std_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "ui/native_theme/native_theme.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace electron::api {
 
-gin::WrapperInfo NativeTheme::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo NativeTheme::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronNativeTheme);
 
 NativeTheme::NativeTheme(v8::Isolate* isolate,
                          ui::NativeTheme* ui_theme,
                          ui::NativeTheme* web_theme)
     : ui_theme_(ui_theme), web_theme_(web_theme) {
   ui_theme_->AddObserver(this);
+  gin::PerIsolateData::From(isolate)->AddDisposeObserver(this);
+#if BUILDFLAG(IS_WIN)
+  std::ignore = hkcu_themes_regkey_.Open(HKEY_CURRENT_USER,
+                                         L"Software\\Microsoft\\Windows\\"
+                                         L"CurrentVersion\\Themes\\Personalize",
+                                         KEY_READ);
+#endif
 }
 
-NativeTheme::~NativeTheme() {
+NativeTheme::~NativeTheme() = default;
+
+void NativeTheme::OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) {
+  gin::PerIsolateData::From(isolate)->RemoveDisposeObserver(this);
   ui_theme_->RemoveObserver(this);
+  weak_factory_.Invalidate();
 }
 
 void NativeTheme::OnNativeThemeUpdatedOnUI() {
+#if BUILDFLAG(IS_WIN)
+  if (hkcu_themes_regkey_.Valid()) {
+    DWORD system_uses_light_theme = 1;
+    hkcu_themes_regkey_.ReadValueDW(L"SystemUsesLightTheme",
+                                    &system_uses_light_theme);
+    bool system_dark_mode_enabled = (system_uses_light_theme == 0);
+    should_use_dark_colors_for_system_integrated_ui_ =
+        std::make_optional<bool>(system_dark_mode_enabled);
+  }
+#endif
   Emit("updated");
 }
 
 void NativeTheme::OnNativeThemeUpdated(ui::NativeTheme* theme) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   content::GetUIThreadTaskRunner({})->PostTask(
-      FROM_HERE, base::BindOnce(&NativeTheme::OnNativeThemeUpdatedOnUI,
-                                base::Unretained(this)));
+      FROM_HERE,
+      base::BindOnce(&NativeTheme::OnNativeThemeUpdatedOnUI,
+                     gin::WrapPersistent(weak_factory_.GetWeakCell(
+                         isolate->GetCppHeap()->GetAllocationHandle()))));
 }
 
 void NativeTheme::SetThemeSource(ui::NativeTheme::ThemeSource override) {
@@ -56,23 +86,32 @@ ui::NativeTheme::ThemeSource NativeTheme::GetThemeSource() const {
 }
 
 bool NativeTheme::ShouldUseDarkColors() {
-  return ui_theme_->ShouldUseDarkColors();
+  auto theme_source = GetThemeSource();
+  if (theme_source == ui::NativeTheme::ThemeSource::kForcedLight)
+    return false;
+  if (theme_source == ui::NativeTheme::ThemeSource::kForcedDark)
+    return true;
+  return ui_theme_->preferred_color_scheme() ==
+         ui::NativeTheme::PreferredColorScheme::kDark;
 }
 
 bool NativeTheme::ShouldUseHighContrastColors() {
-  return ui_theme_->UserHasContrastPreference();
+  return ui_theme_->preferred_contrast() ==
+         ui::NativeTheme::PreferredContrast::kMore;
 }
 
 bool NativeTheme::ShouldUseDarkColorsForSystemIntegratedUI() {
-  return ui_theme_->ShouldUseDarkColorsForSystemIntegratedUI();
+  return should_use_dark_colors_for_system_integrated_ui_.value_or(
+      ShouldUseDarkColors());
 }
 
 bool NativeTheme::InForcedColorsMode() {
-  return ui_theme_->InForcedColorsMode();
+  return ui_theme_->forced_colors() !=
+         ui::ColorProviderKey::ForcedColors::kNone;
 }
 
 bool NativeTheme::GetPrefersReducedTransparency() {
-  return ui_theme_->GetPrefersReducedTransparency();
+  return ui_theme_->prefers_reduced_transparency();
 }
 
 #if BUILDFLAG(IS_MAC)
@@ -91,17 +130,23 @@ bool NativeTheme::ShouldUseInvertedColorScheme() {
     return false;
   return is_inverted;
 #else
-  return ui_theme_->GetPlatformHighContrastColorScheme() ==
-         ui::NativeTheme::PlatformHighContrastColorScheme::kDark;
+  return ui_theme_->forced_colors() !=
+             ui::ColorProviderKey::ForcedColors::kNone &&
+         ui_theme_->preferred_color_scheme() ==
+             ui::NativeTheme::PreferredColorScheme::kDark;
 #endif
 }
 
 // static
-gin::Handle<NativeTheme> NativeTheme::Create(v8::Isolate* isolate) {
-  ui::NativeTheme* ui_theme = ui::NativeTheme::GetInstanceForNativeUi();
-  ui::NativeTheme* web_theme = ui::NativeTheme::GetInstanceForWeb();
-  return gin::CreateHandle(isolate,
-                           new NativeTheme(isolate, ui_theme, web_theme));
+NativeTheme* NativeTheme::Create(v8::Isolate* isolate) {
+  static base::NoDestructor<cppgc::Persistent<NativeTheme>> instance([isolate] {
+    return cppgc::Persistent<NativeTheme>(
+        cppgc::MakeGarbageCollected<NativeTheme>(
+            isolate->GetCppHeap()->GetAllocationHandle(), isolate,
+            ui::NativeTheme::GetInstanceForNativeUi(),
+            ui::NativeTheme::GetInstanceForWeb()));
+  }());
+  return instance->Get();
 }
 
 gin::ObjectTemplateBuilder NativeTheme::GetObjectTemplateBuilder(
@@ -119,11 +164,25 @@ gin::ObjectTemplateBuilder NativeTheme::GetObjectTemplateBuilder(
                    &NativeTheme::ShouldUseInvertedColorScheme)
       .SetProperty("inForcedColorsMode", &NativeTheme::InForcedColorsMode)
       .SetProperty("prefersReducedTransparency",
-                   &NativeTheme::GetPrefersReducedTransparency);
+                   &NativeTheme::GetPrefersReducedTransparency)
+#if BUILDFLAG(IS_MAC)
+      .SetProperty("shouldDifferentiateWithoutColor",
+                   &NativeTheme::ShouldDifferentiateWithoutColor)
+#endif
+      ;
 }
 
-const char* NativeTheme::GetTypeName() {
-  return "NativeTheme";
+const gin::WrapperInfo* NativeTheme::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* NativeTheme::GetHumanReadableName() const {
+  return "Electron / NativeTheme";
+}
+
+void NativeTheme::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<NativeTheme>::Trace(visitor);
+  visitor->Trace(weak_factory_);
 }
 
 }  // namespace electron::api
@@ -136,8 +195,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin::Dictionary dict{isolate, exports};
   dict.Set("nativeTheme", NativeTheme::Create(isolate));
 }
 

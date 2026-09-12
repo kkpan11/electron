@@ -5,6 +5,7 @@
 #include "shell/common/gin_converters/blink_converter.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,7 +31,6 @@
 #include "third_party/blink/public/common/widget/device_emulation_params.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
 #include "third_party/blink/public/mojom/loader/referrer.mojom.h"
-#include "ui/base/clipboard/clipboard.h"
 #include "ui/events/blink/blink_event_util.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
@@ -54,8 +54,10 @@ struct Converter<char16_t> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      char16_t* out) {
-    std::u16string code = base::UTF8ToUTF16(gin::V8ToString(isolate, val));
-    if (code.length() != 1)
+    // V8 strings are UTF-16; read directly rather than via UTF-8.
+    std::u16string code;
+    if (!gin::Converter<std::u16string>::FromV8(isolate, val, &code) ||
+        code.length() != 1)
       return false;
     *out = code[0];
     return true;
@@ -146,6 +148,26 @@ struct Converter<blink::WebMouseEvent::Button> {
         });
     return FromV8WithLowerLookup(isolate, val, Lookup, out);
   }
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const blink::WebMouseEvent::Button& in) {
+    switch (in) {
+      case blink::WebMouseEvent::Button::kLeft:
+        return StringToV8(isolate, "left");
+      case blink::WebMouseEvent::Button::kMiddle:
+        return StringToV8(isolate, "middle");
+      case blink::WebMouseEvent::Button::kRight:
+        return StringToV8(isolate, "right");
+      case blink::WebMouseEvent::Button::kNoButton:
+        return StringToV8(isolate, "none");
+      case blink::WebMouseEvent::Button::kBack:
+        return StringToV8(isolate, "back");
+      case blink::WebMouseEvent::Button::kForward:
+        return StringToV8(isolate, "forward");
+      case blink::WebMouseEvent::Button::kEraser:
+        return StringToV8(isolate, "eraser");
+    }
+    return v8::Null(isolate);
+  }
 };
 
 // clang-format off
@@ -205,6 +227,7 @@ namespace {
 
 std::vector<std::string_view> ModifiersToArray(int modifiers) {
   std::vector<std::string_view> modifier_strings;
+  modifier_strings.reserve(Modifiers.size());
 
   for (const auto& [name, mask] : Modifiers)
     if (mask & modifiers)
@@ -246,6 +269,9 @@ v8::Local<v8::Value> Converter<blink::WebInputEvent>::ToV8(
   if (blink::WebInputEvent::IsKeyboardEventType(in.GetType()))
     return gin::ConvertToV8(isolate,
                             *static_cast<const blink::WebKeyboardEvent*>(&in));
+  else if (blink::WebInputEvent::IsMouseEventType(in.GetType()))
+    return gin::ConvertToV8(isolate,
+                            *static_cast<const blink::WebMouseEvent*>(&in));
   return gin::DataObjectBuilder(isolate)
       .Set("type", in.GetType())
       .Set("modifiers", ModifiersToArray(in.GetModifiers()))
@@ -333,20 +359,22 @@ v8::Local<v8::Value> Converter<blink::WebKeyboardEvent>::ToV8(
   auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
 
   dict.Set("type", in.GetType());
-  dict.Set("key", ui::KeycodeConverter::DomKeyToKeyString(in.dom_key));
+  dict.Set("key", ui::KeycodeConverter::DomKeyToKeyString(
+                      static_cast<ui::DomKey>(in.dom_key)));
   dict.Set("code", ui::KeycodeConverter::DomCodeToCodeString(
                        static_cast<ui::DomCode>(in.dom_code)));
 
   using Modifiers = blink::WebInputEvent::Modifiers;
-  dict.Set("isAutoRepeat", (in.GetModifiers() & Modifiers::kIsAutoRepeat) != 0);
-  dict.Set("isComposing", (in.GetModifiers() & Modifiers::kIsComposing) != 0);
-  dict.Set("shift", (in.GetModifiers() & Modifiers::kShiftKey) != 0);
-  dict.Set("control", (in.GetModifiers() & Modifiers::kControlKey) != 0);
-  dict.Set("alt", (in.GetModifiers() & Modifiers::kAltKey) != 0);
-  dict.Set("meta", (in.GetModifiers() & Modifiers::kMetaKey) != 0);
+  const int mods = in.GetModifiers();
+  dict.Set("isAutoRepeat", (mods & Modifiers::kIsAutoRepeat) != 0);
+  dict.Set("isComposing", (mods & Modifiers::kIsComposing) != 0);
+  dict.Set("shift", (mods & Modifiers::kShiftKey) != 0);
+  dict.Set("control", (mods & Modifiers::kControlKey) != 0);
+  dict.Set("alt", (mods & Modifiers::kAltKey) != 0);
+  dict.Set("meta", (mods & Modifiers::kMetaKey) != 0);
   dict.Set("location", GetKeyLocationCode(in));
-  dict.Set("_modifiers", in.GetModifiers());
-  dict.Set("modifiers", ModifiersToArray(in.GetModifiers()));
+  dict.Set("_modifiers", mods);
+  dict.Set("modifiers", ModifiersToArray(mods));
 
   return dict.GetHandle();
 }
@@ -369,16 +397,36 @@ bool Converter<blink::WebMouseEvent>::FromV8(v8::Isolate* isolate,
   if (!dict.Get("button", &out->button))
     out->button = blink::WebMouseEvent::Button::kLeft;
 
-  float global_x = 0.f;
-  float global_y = 0.f;
-  dict.Get("globalX", &global_x);
-  dict.Get("globalY", &global_y);
+  const float global_x = dict.ValueOrDefault("globalX", 0.F);
+  const float global_y = dict.ValueOrDefault("globalY", 0.F);
   out->SetPositionInScreen(global_x, global_y);
 
   dict.Get("movementX", &out->movement_x);
   dict.Get("movementY", &out->movement_y);
   dict.Get("clickCount", &out->click_count);
   return true;
+}
+
+v8::Local<v8::Value> Converter<blink::WebMouseEvent>::ToV8(
+    v8::Isolate* isolate,
+    const blink::WebMouseEvent& in) {
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+
+  dict.Set("type", in.GetType());
+  dict.Set("clickCount", in.ClickCount());
+  dict.Set("movementX", in.movement_x);
+  dict.Set("movementY", in.movement_y);
+  dict.Set("button", in.button);
+
+  gfx::PointF position_in_screen = in.PositionInScreen();
+  dict.Set("globalX", position_in_screen.x());
+  dict.Set("globalY", position_in_screen.y());
+
+  gfx::PointF position_in_widget = in.PositionInWidget();
+  dict.Set("x", position_in_widget.x());
+  dict.Set("y", position_in_widget.y());
+
+  return dict.GetHandle();
 }
 
 bool Converter<blink::WebMouseWheelEvent>::FromV8(
@@ -397,23 +445,19 @@ bool Converter<blink::WebMouseWheelEvent>::FromV8(
   dict.Get("accelerationRatioX", &out->acceleration_ratio_x);
   dict.Get("accelerationRatioY", &out->acceleration_ratio_y);
 
-  bool has_precise_scrolling_deltas = false;
-  dict.Get("hasPreciseScrollingDeltas", &has_precise_scrolling_deltas);
-  if (has_precise_scrolling_deltas) {
-    out->delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
-  } else {
-    out->delta_units = ui::ScrollGranularity::kScrollByPixel;
-  }
+  const bool precise = dict.ValueOrDefault("hasPreciseScrollingDeltas", false);
+  out->delta_units = precise ? ui::ScrollGranularity::kScrollByPrecisePixel
+                             : ui::ScrollGranularity::kScrollByPixel;
 
 #if defined(USE_AURA)
   // Matches the behavior of ui/events/blink/web_input_event_traits.cc:
-  bool can_scroll = true;
-  if (dict.Get("canScroll", &can_scroll) && !can_scroll) {
+  if (!dict.ValueOrDefault("canScroll", true)) {
     out->delta_units = ui::ScrollGranularity::kScrollByPage;
     out->SetModifiers(out->GetModifiers() &
                       ~blink::WebInputEvent::Modifiers::kControlKey);
   }
 #endif
+
   return true;
 }
 
@@ -575,7 +619,9 @@ Converter<std::optional<blink::mojom::FormControlType>>::ToV8(
   return StringToV8(isolate, str);
 }
 
-v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate, int editFlags) {
+v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate,
+                                   int editFlags,
+                                   bool is_paste_enabled) {
   auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   dict.Set("canUndo",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanUndo));
@@ -584,16 +630,11 @@ v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate, int editFlags) {
   dict.Set("canCut", !!(editFlags & blink::ContextMenuDataEditFlags::kCanCut));
   dict.Set("canCopy",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanCopy));
-
   bool pasteFlag = false;
   if (editFlags & blink::ContextMenuDataEditFlags::kCanPaste) {
-    std::vector<std::u16string> types;
-    ui::Clipboard::GetForCurrentThread()->ReadAvailableTypes(
-        ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr, &types);
-    pasteFlag = !types.empty();
+    pasteFlag = is_paste_enabled;
   }
   dict.Set("canPaste", pasteFlag);
-
   dict.Set("canDelete",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanDelete));
   dict.Set("canSelectAll",

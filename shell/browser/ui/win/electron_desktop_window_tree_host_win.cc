@@ -5,23 +5,35 @@
 #include "shell/browser/ui/win/electron_desktop_window_tree_host_win.h"
 
 #include "base/win/windows_version.h"
-#include "electron/buildflags/buildflags.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/views/win_frame_view.h"
 #include "shell/browser/win/dark_mode.h"
-#include "ui/base/win/hwnd_metrics.h"
 
 namespace electron {
 
 ElectronDesktopWindowTreeHostWin::ElectronDesktopWindowTreeHostWin(
     NativeWindowViews* native_window_view,
+    views::Widget* widget,
     views::DesktopNativeWidgetAura* desktop_native_widget_aura)
-    : views::DesktopWindowTreeHostWin(native_window_view->widget(),
-                                      desktop_native_widget_aura),
-      native_window_view_(native_window_view) {}
+    : views::DesktopWindowTreeHostWin{widget, desktop_native_widget_aura},
+      native_window_view_{native_window_view} {}
 
 ElectronDesktopWindowTreeHostWin::~ElectronDesktopWindowTreeHostWin() = default;
+
+bool ElectronDesktopWindowTreeHostWin::ShouldUpdateWindowTransparency() const {
+  // If transparency is updated for an opaque window before widget init is
+  // completed, the window flickers white before the background color is applied
+  // and we don't want that. We do, however, want translucent windows to be
+  // properly transparent, so ensure it gets updated in that case.
+  if (!widget_init_done_ && !native_window_view_->IsTranslucent())
+    return false;
+  return views::DesktopWindowTreeHostWin::ShouldUpdateWindowTransparency();
+}
+
+void ElectronDesktopWindowTreeHostWin::OnWidgetInitDone() {
+  widget_init_done_ = true;
+}
 
 bool ElectronDesktopWindowTreeHostWin::PreHandleMSG(UINT message,
                                                     WPARAM w_param,
@@ -50,7 +62,16 @@ bool ElectronDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
     gfx::Insets* insets) const {
   // Set DWMFrameInsets to prevent maximized frameless window from bleeding
   // into other monitors.
+
   if (IsMaximized() && !native_window_view_->has_frame()) {
+    // We avoid doing this when the window is translucent (e.g. using
+    // backgroundMaterial effects), because setting zero insets can interfere
+    // with DWM rendering of blur or acrylic, potentially causing visual
+    // glitches.
+    const std::string& bg_material = native_window_view_->background_material();
+    if (!bg_material.empty() && bg_material != "none") {
+      return false;
+    }
     // This would be equivalent to calling:
     // DwmExtendFrameIntoClientArea({0, 0, 0, 0});
     //
@@ -66,24 +87,49 @@ bool ElectronDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
   return false;
 }
 
+bool ElectronDesktopWindowTreeHostWin::WidgetSizeIsClientSize() const {
+  // For both framed and frameless windows with resize insets (thick frames),
+  // this should return true so that the aura layer is sized to the client area
+  // rather than the full HWND, and so insets are accounted for when handling
+  // size/aspect ratio constraints.
+  if (native_window_view_->has_thick_frame())
+    return true;
+  return views::DesktopWindowTreeHostWin::WidgetSizeIsClientSize();
+}
+
 bool ElectronDesktopWindowTreeHostWin::GetClientAreaInsets(
     gfx::Insets* insets,
     int frame_thickness) const {
-  // Windows by default extends the maximized window slightly larger than
-  // current workspace, for frameless window since the standard frame has been
-  // removed, the client area would then be drew outside current workspace.
-  //
-  // Indenting the client area can fix this behavior.
-  if (IsMaximized() && !native_window_view_->has_frame()) {
-    // The insets would be eventually passed to WM_NCCALCSIZE, which takes
-    // the metrics under the DPI of _main_ monitor instead of current monitor.
-    //
-    // Please make sure you tested maximized frameless window under multiple
-    // monitors with different DPIs before changing this code.
-    const int thickness = ::GetSystemMetrics(SM_CXSIZEFRAME) +
-                          ::GetSystemMetrics(SM_CXPADDEDBORDER);
-    *insets = gfx::Insets::TLBR(thickness, thickness, thickness, thickness);
-    return true;
+  if (native_window_view_->IsFullscreen())
+    return false;
+
+  if (!native_window_view_->has_frame()) {
+    if (IsMaximized()) {
+      // Windows by default extends the maximized window slightly larger than
+      // current workspace, for frameless window since the standard frame has
+      // been removed, the client area would then be drew outside current
+      // workspace.
+      //
+      // Indenting the client area can fix this behavior.
+      //
+      // The insets would be eventually passed to WM_NCCALCSIZE, which takes
+      // the metrics under the DPI of _main_ monitor instead of current monitor.
+      //
+      // Please make sure you tested maximized frameless window under multiple
+      // monitors with different DPIs before changing this code.
+      const int thickness = ::GetSystemMetrics(SM_CXSIZEFRAME) +
+                            ::GetSystemMetrics(SM_CXPADDEDBORDER);
+      *insets = gfx::Insets::TLBR(thickness, thickness, thickness, thickness);
+      return true;
+    } else if (native_window_view_->has_thick_frame()) {
+      // Grow the insets to support resize targets past the frame edge like in
+      // windows with standard frames. Non-resizable windows still get input
+      // insets for stable bounds and so they can be dragged from outer edges,
+      // also like in windows with standard frames.
+      *insets = gfx::Insets::TLBR(0, frame_thickness, frame_thickness,
+                                  frame_thickness);
+      return true;
+    }
   }
   return false;
 }
@@ -119,11 +165,45 @@ bool ElectronDesktopWindowTreeHostWin::HandleMouseEvent(ui::MouseEvent* event) {
     if (prevent_default) {
       electron::api::WebContents::SetDisableDraggableRegions(true);
       views::DesktopWindowTreeHostWin::HandleMouseEvent(event);
+      electron::api::WebContents::SetDisableDraggableRegions(false);
     }
     return prevent_default;
   }
 
   return views::DesktopWindowTreeHostWin::HandleMouseEvent(event);
+}
+
+bool ElectronDesktopWindowTreeHostWin::HandleIMEMessage(UINT message,
+                                                        WPARAM w_param,
+                                                        LPARAM l_param,
+                                                        LRESULT* result) {
+  if ((message == WM_SYSCHAR) && (w_param == VK_SPACE)) {
+    if (native_window_view_->widget() &&
+        native_window_view_->widget()->non_client_view()) {
+      const auto* frame =
+          native_window_view_->widget()->non_client_view()->frame_view();
+      auto location = frame->GetSystemMenuScreenPixelLocation();
+
+      bool prevent_default = false;
+      native_window_view_->NotifyWindowSystemContextMenu(
+          location.x(), location.y(), &prevent_default);
+
+      return prevent_default ||
+             views::DesktopWindowTreeHostWin::HandleIMEMessage(message, w_param,
+                                                               l_param, result);
+    }
+  }
+
+  return views::DesktopWindowTreeHostWin::HandleIMEMessage(message, w_param,
+                                                           l_param, result);
+}
+
+// Refs https://chromium-review.googlesource.com/c/chromium/src/+/7095963
+// Chromium's fullscreen handler conflicts with ours and results in incorrect
+// restoration.
+void ElectronDesktopWindowTreeHostWin::Restore() {
+  ::SendMessage(GetAcceleratedWidget(), WM_SYSCOMMAND,
+                static_cast<WPARAM>(SC_RESTORE), 0);
 }
 
 void ElectronDesktopWindowTreeHostWin::OnNativeThemeUpdated(

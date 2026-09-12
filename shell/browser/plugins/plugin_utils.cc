@@ -6,7 +6,6 @@
 
 #include <vector>
 
-#include "content/public/common/webplugininfo.h"
 #include "electron/buildflags/buildflags.h"
 #include "url/gurl.h"
 #include "url/origin.h"
@@ -22,7 +21,8 @@
 // static
 std::string PluginUtils::GetExtensionIdForMimeType(
     content::BrowserContext* browser_context,
-    const std::string& mime_type) {
+    const std::string& mime_type,
+    bool embedded) {
   auto map = GetMimeTypeToExtensionIdMap(browser_context);
   auto it = map.find(mime_type);
   if (it != map.end())
@@ -33,6 +33,7 @@ std::string PluginUtils::GetExtensionIdForMimeType(
 base::flat_map<std::string, std::string>
 PluginUtils::GetMimeTypeToExtensionIdMap(
     content::BrowserContext* browser_context) {
+  base::flat_map<std::string, std::string> mime_type_to_extension_id_map;
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   const auto& allowed_extension_ids = MimeTypesHandler::GetMIMETypeAllowlist();
   if (allowed_extension_ids.empty())
@@ -41,8 +42,6 @@ PluginUtils::GetMimeTypeToExtensionIdMap(
   const extensions::ExtensionSet& enabled_extensions =
       extensions::ExtensionRegistry::Get(browser_context)->enabled_extensions();
 
-  base::flat_map<std::string, std::string> mime_type_to_extension_id_map;
-
   // Go through the white-listed extensions and try to use them to intercept
   // the URL request.
   for (const std::string& id : allowed_extension_ids) {
@@ -50,9 +49,8 @@ PluginUtils::GetMimeTypeToExtensionIdMap(
     if (!extension)  // extension might not be installed, so check for nullptr
       continue;
 
-    if (const MimeTypesHandler* handler =
-            MimeTypesHandler::GetHandler(extension)) {
-      for (const std::string& mime_type : handler->mime_type_set()) {
+    if (const MimeTypesHandler* handler = MimeTypesHandler::Get(*extension)) {
+      for (const std::string& mime_type : handler->GetSupportedMimeTypes()) {
         const auto [_, inserted] =
             mime_type_to_extension_id_map.insert_or_assign(mime_type, id);
         DCHECK(inserted);

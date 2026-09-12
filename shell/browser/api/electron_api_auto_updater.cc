@@ -5,7 +5,6 @@
 #include "shell/browser/api/electron_api_auto_updater.h"
 
 #include "base/time/time.h"
-#include "gin/handle.h"
 #include "shell/browser/javascript_environment.h"
 #include "shell/browser/native_window.h"
 #include "shell/browser/window_list.h"
@@ -14,17 +13,27 @@
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/event_emitter_caller.h"
 #include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace electron::api {
 
-gin::WrapperInfo AutoUpdater::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo AutoUpdater::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronAutoUpdater);
 
-AutoUpdater::AutoUpdater() {
+AutoUpdater::AutoUpdater(v8::Isolate* isolate) {
   auto_updater::AutoUpdater::SetDelegate(this);
+  gin::PerIsolateData* data = gin::PerIsolateData::From(isolate);
+  data->AddDisposeObserver(this);
 }
 
-AutoUpdater::~AutoUpdater() {
+AutoUpdater::~AutoUpdater() = default;
+
+void AutoUpdater::OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) {
+  gin::PerIsolateData* data = gin::PerIsolateData::From(isolate);
+  data->RemoveDisposeObserver(this);
   auto_updater::AutoUpdater::SetDelegate(nullptr);
 }
 
@@ -66,12 +75,12 @@ void AutoUpdater::OnError(const std::string& message,
 
     // add two new params for better error handling
     errorObject
-        ->Set(context, gin::StringToV8(isolate, "code"),
-              v8::Integer::New(isolate, code))
+        ->CreateDataProperty(context, gin::StringToV8(isolate, "code"),
+                             v8::Integer::New(isolate, code))
         .Check();
     errorObject
-        ->Set(context, gin::StringToV8(isolate, "domain"),
-              gin::StringToV8(isolate, domain))
+        ->CreateDataProperty(context, gin::StringToV8(isolate, "domain"),
+                             gin::StringToV8(isolate, domain))
         .Check();
 
     gin_helper::EmitEvent(isolate, wrapper, "error", errorObject, message);
@@ -119,8 +128,9 @@ void AutoUpdater::QuitAndInstall() {
 }
 
 // static
-gin::Handle<AutoUpdater> AutoUpdater::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, new AutoUpdater());
+AutoUpdater* AutoUpdater::Create(v8::Isolate* isolate) {
+  return cppgc::MakeGarbageCollected<AutoUpdater>(
+      isolate->GetCppHeap()->GetAllocationHandle(), isolate);
 }
 
 gin::ObjectTemplateBuilder AutoUpdater::GetObjectTemplateBuilder(
@@ -137,8 +147,12 @@ gin::ObjectTemplateBuilder AutoUpdater::GetObjectTemplateBuilder(
       .SetMethod("quitAndInstall", &AutoUpdater::QuitAndInstall);
 }
 
-const char* AutoUpdater::GetTypeName() {
-  return "AutoUpdater";
+const gin::WrapperInfo* AutoUpdater::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* AutoUpdater::GetHumanReadableName() const {
+  return "Electron / AutoUpdater";
 }
 
 }  // namespace electron::api
@@ -151,8 +165,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.Set("autoUpdater", AutoUpdater::Create(isolate));
 }
 

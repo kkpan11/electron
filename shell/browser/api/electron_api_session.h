@@ -9,21 +9,19 @@
 #include <string>
 #include <vector>
 
+#include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ref.h"
-#include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "content/public/browser/download_manager.h"
 #include "electron/buildflags/buildflags.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
 #include "services/network/public/mojom/host_resolver.mojom-forward.h"
 #include "services/network/public/mojom/ssl_config.mojom-forward.h"
 #include "shell/browser/api/ipc_dispatcher.h"
 #include "shell/browser/event_emitter_mixin.h"
-#include "shell/browser/net/resolve_proxy_helper.h"
-#include "shell/common/gin_helper/cleaned_up_at_exit.h"
 #include "shell/common/gin_helper/constructible.h"
-#include "shell/common/gin_helper/pinnable.h"
+#include "shell/common/gin_helper/self_keep_alive.h"
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
 #include "chrome/browser/spellchecker/spellcheck_hunspell_dictionary.h"  // nogncheck
@@ -37,18 +35,12 @@ class FilePath;
 
 namespace gin {
 class Arguments;
-template <typename T>
-class Handle;
 }  // namespace gin
 
 namespace gin_helper {
 class Dictionary;
 class ErrorThrower;
 }  // namespace gin_helper
-
-namespace net {
-class ProxyConfig;
-}
 
 namespace electron {
 
@@ -57,11 +49,18 @@ struct PreloadScript;
 
 namespace api {
 
+class Cookies;
+class Extensions;
+class NetLog;
+class Protocol;
+class ServiceWorkerContext;
+class UtilityProcessWrapper;
+class WebRequest;
+
 class Session final : public gin::Wrappable<Session>,
-                      public gin_helper::Pinnable<Session>,
                       public gin_helper::Constructible<Session>,
                       public gin_helper::EventEmitterMixin<Session>,
-                      public gin_helper::CleanedUpAtExit,
+                      public gin::PerIsolateData::DisposeObserver,
                       public IpcDispatcher<Session>,
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
                       private SpellcheckHunspellDictionary::Observer,
@@ -69,38 +68,52 @@ class Session final : public gin::Wrappable<Session>,
                       private content::DownloadManager::Observer {
  public:
   // Gets or creates Session from the |browser_context|.
-  static gin::Handle<Session> CreateFrom(
-      v8::Isolate* isolate,
-      ElectronBrowserContext* browser_context);
-  static gin::Handle<Session> New();  // Dummy, do not use!
+  static Session* FromOrCreate(v8::Isolate* isolate,
+                               ElectronBrowserContext* browser_context);
 
-  static Session* FromBrowserContext(content::BrowserContext* context);
+  // Convenience wrapper around the previous method: Checks that
+  // |browser_context| is an ElectronBrowserContext before downcasting.
+  static Session* FromOrCreate(v8::Isolate* isolate,
+                               content::BrowserContext* browser_context);
+
+  static void New();  // Dummy, do not use!
+
+  static gin::WeakCell<Session>* FromBrowserContext(
+      content::BrowserContext* context);
 
   // Gets the Session of |partition|.
-  static gin::Handle<Session> FromPartition(v8::Isolate* isolate,
-                                            const std::string& partition,
-                                            base::Value::Dict options = {});
+  static Session* FromPartition(v8::Isolate* isolate,
+                                const std::string& partition,
+                                base::DictValue options = {});
 
   // Gets the Session based on |path|.
-  static std::optional<gin::Handle<Session>> FromPath(
-      v8::Isolate* isolate,
-      const base::FilePath& path,
-      base::Value::Dict options = {});
+  static Session* FromPath(gin::Arguments* args,
+                           const base::FilePath& path,
+                           base::DictValue options = {});
 
-  ElectronBrowserContext* browser_context() const {
-    return &browser_context_.get();
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "Session"; }
+
+  Session(v8::Isolate* isolate, ElectronBrowserContext* browser_context);
+  ~Session() override;
+
+  [[nodiscard]] ElectronBrowserContext* browser_context() const {
+    return browser_context_;
   }
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
-  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
-  static const char* GetClassName() { return "Session"; }
-  const char* GetTypeName() override;
+  void Trace(cppgc::Visitor*) const override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
 
-  // gin_helper::CleanedUpAtExit
-  void WillBeDestroyed() override;
+  // gin::PerIsolateData::DisposeObserver
+  void OnBeforeDispose(v8::Isolate* isolate) override {}
+  void OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) override;
+  void OnDisposed() override {}
 
   // Methods.
+  void Dispose();
   v8::Local<v8::Promise> ResolveHost(
       std::string host,
       std::optional<network::mojom::ResolveHostParametersPtr> params);
@@ -147,19 +160,23 @@ class Session final : public gin::Wrappable<Session>,
   v8::Local<v8::Promise> ClearSharedDictionaryCache();
   v8::Local<v8::Promise> ClearSharedDictionaryCacheForIsolationKey(
       const gin_helper::Dictionary& options);
-  v8::Local<v8::Value> Cookies(v8::Isolate* isolate);
-  v8::Local<v8::Value> Extensions(v8::Isolate* isolate);
-  v8::Local<v8::Value> Protocol(v8::Isolate* isolate);
-  v8::Local<v8::Value> ServiceWorkerContext(v8::Isolate* isolate);
-  v8::Local<v8::Value> WebRequest(v8::Isolate* isolate);
-  v8::Local<v8::Value> NetLog(v8::Isolate* isolate);
+  api::Cookies* Cookies(v8::Isolate* isolate);
+  api::Extensions* Extensions(v8::Isolate* isolate);
+  api::Protocol* Protocol();
+  api::ServiceWorkerContext* ServiceWorkerContext();
+  WebRequest* WebRequest(v8::Isolate* isolate);
+  api::NetLog* NetLog(v8::Isolate* isolate);
+  api::UtilityProcessWrapper* LocalAIHandler();
+  base::CallbackListSubscription AddAIHandlerChangedCallback(
+      base::RepeatingClosure callback);
   void Preconnect(const gin_helper::Dictionary& options, gin::Arguments* args);
   v8::Local<v8::Promise> CloseAllConnections();
   v8::Local<v8::Value> GetPath(v8::Isolate* isolate);
   void SetCodeCachePath(gin::Arguments* args);
   v8::Local<v8::Promise> ClearCodeCaches(const gin_helper::Dictionary& options);
-  v8::Local<v8::Value> ClearData(gin_helper::ErrorThrower thrower,
-                                 gin::Arguments* args);
+  v8::Local<v8::Value> ClearData(gin::Arguments* args);
+  void RegisterLocalAIHandler(gin_helper::ErrorThrower thrower,
+                              v8::Local<v8::Value> val);
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
   base::Value GetSpellCheckerLanguages();
   void SetSpellCheckerLanguages(gin_helper::ErrorThrower thrower,
@@ -176,9 +193,6 @@ class Session final : public gin::Wrappable<Session>,
   Session& operator=(const Session&) = delete;
 
  protected:
-  Session(v8::Isolate* isolate, ElectronBrowserContext* browser_context);
-  ~Session() override;
-
   // content::DownloadManager::Observer:
   void OnDownloadCreated(content::DownloadManager* manager,
                          download::DownloadItem* item) override;
@@ -197,22 +211,30 @@ class Session final : public gin::Wrappable<Session>,
   void SetDisplayMediaRequestHandler(v8::Isolate* isolate,
                                      v8::Local<v8::Value> val);
 
-  // Cached gin_helper::Wrappable objects.
-  v8::Global<v8::Value> cookies_;
-  v8::Global<v8::Value> extensions_;
-  v8::Global<v8::Value> protocol_;
-  v8::Global<v8::Value> net_log_;
-  v8::Global<v8::Value> service_worker_context_;
-  v8::Global<v8::Value> web_request_;
+  cppgc::Member<api::Cookies> cookies_;
+  cppgc::Member<api::Extensions> extensions_;
+  cppgc::Member<api::Protocol> protocol_;
+  cppgc::Member<api::NetLog> net_log_;
+  cppgc::Member<api::ServiceWorkerContext> service_worker_context_;
+  cppgc::Member<api::WebRequest> web_request_;
+  cppgc::WeakMember<api::UtilityProcessWrapper> local_ai_handler_;
 
   raw_ptr<v8::Isolate> isolate_;
 
-  // The client id to enable the network throttler.
+  base::RepeatingClosureList local_ai_handler_changed_callbacks_;
+
+  // The profile id to enable the network throttler.
   base::UnguessableToken network_emulation_token_;
 
-  const raw_ref<ElectronBrowserContext> browser_context_;
+  // The client id for the network throttler, identifying this Session as
+  // the throttling client.
+  base::UnguessableToken network_emulation_client_id_;
 
-  base::WeakPtrFactory<Session> weak_factory_{this};
+  raw_ptr<ElectronBrowserContext> browser_context_;
+
+  gin::WeakCellFactory<Session> weak_factory_{this};
+
+  gin_helper::SelfKeepAlive<Session> keep_alive_{this};
 };
 
 }  // namespace api

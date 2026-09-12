@@ -7,11 +7,13 @@
 #include <string>
 #include <utility>
 
-#include "base/logging.h"
+#include "base/check.h"
+#include "base/containers/flat_map.h"
+#include "base/containers/map_util.h"
 #include "base/no_destructor.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"  // nogncheck
+#include "content/browser/service_worker/service_worker_info.h"     // nogncheck
 #include "content/browser/service_worker/service_worker_version.h"  // nogncheck
-#include "gin/handle.h"
 #include "gin/object_template_builder.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
 #include "shell/browser/api/message_port.h"
@@ -20,14 +22,17 @@
 #include "shell/common/api/api.mojom.h"
 #include "shell/common/gin_converters/blink_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
+#include "shell/common/gin_converters/serialized_value_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/v8_util.h"
-#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace {
 
@@ -57,37 +62,37 @@ std::optional<content::ServiceWorkerVersionBaseInfo> GetLiveVersionInfo(
 
 namespace electron::api {
 
-// ServiceWorkerKey -> ServiceWorkerMain*
-using VersionIdMap = absl::flat_hash_map<ServiceWorkerKey,
-                                         ServiceWorkerMain*,
-                                         ServiceWorkerKey::Hasher>;
-
-VersionIdMap& GetVersionIdMap() {
-  static base::NoDestructor<VersionIdMap> instance;
+// ServiceWorkerKey -> ServiceWorkerMain
+auto& GetVersionIdMap() {
+  using Map = base::flat_map<ServiceWorkerKey,
+                             cppgc::WeakPersistent<ServiceWorkerMain>>;
+  static base::NoDestructor<Map> instance;
   return *instance;
 }
 
 ServiceWorkerMain* FromServiceWorkerKey(const ServiceWorkerKey& key) {
-  VersionIdMap& version_map = GetVersionIdMap();
-  auto iter = version_map.find(key);
-  auto* service_worker = iter == version_map.end() ? nullptr : iter->second;
-  return service_worker;
+  return base::FindPtrOrNull(GetVersionIdMap(), key);
 }
 
 // static
 ServiceWorkerMain* ServiceWorkerMain::FromVersionID(
-    int64_t version_id,
-    const content::StoragePartition* storage_partition) {
-  ServiceWorkerKey key(version_id, storage_partition);
+    std::string browser_context_id,
+    content::StoragePartitionConfig storage_partition_config,
+    int64_t version_id) {
+  const ServiceWorkerKey key{std::move(browser_context_id),
+                             std::move(storage_partition_config), version_id};
   return FromServiceWorkerKey(key);
 }
 
-gin::WrapperInfo ServiceWorkerMain::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo ServiceWorkerMain::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronServiceWorkerMain);
 
 ServiceWorkerMain::ServiceWorkerMain(content::ServiceWorkerContext* sw_context,
                                      int64_t version_id,
-                                     const ServiceWorkerKey& key)
-    : version_id_(version_id), key_(key), service_worker_context_(sw_context) {
+                                     ServiceWorkerKey key)
+    : version_id_{version_id},
+      key_{std::move(key)},
+      service_worker_context_{sw_context} {
   GetVersionIdMap().emplace(key_, this);
   InvalidateVersionInfo();
 }
@@ -97,11 +102,13 @@ ServiceWorkerMain::~ServiceWorkerMain() {
 }
 
 void ServiceWorkerMain::Destroy() {
+  if (version_destroyed_)
+    return;
   version_destroyed_ = true;
   InvalidateVersionInfo();
   MaybeDisconnectRemote();
   GetVersionIdMap().erase(key_);
-  Unpin();
+  keep_alive_.Clear();
 }
 
 void ServiceWorkerMain::MaybeDisconnectRemote() {
@@ -129,7 +136,7 @@ void ServiceWorkerMain::Send(v8::Isolate* isolate,
                              bool internal,
                              const std::string& channel,
                              v8::Local<v8::Value> args) {
-  blink::CloneableMessage message;
+  electron::SerializedValue message;
   if (!gin::ConvertFromV8(isolate, args, &message)) {
     isolate->ThrowException(v8::Exception::Error(
         gin::StringToV8(isolate, "Failed to serialize arguments")));
@@ -145,23 +152,16 @@ void ServiceWorkerMain::Send(v8::Isolate* isolate,
 }
 
 void ServiceWorkerMain::InvalidateVersionInfo() {
-  if (version_info_ != nullptr) {
-    version_info_.reset();
-  }
+  version_info_.reset();
 
   if (version_destroyed_)
     return;
 
-  auto version_info = GetLiveVersionInfo(service_worker_context_, version_id_);
-  if (version_info) {
-    version_info_ =
-        std::make_unique<content::ServiceWorkerVersionBaseInfo>(*version_info);
-  } else {
-    // When ServiceWorkerContextCore::RemoveLiveVersion is called, it posts a
-    // task to notify that the service worker has stopped. At this point, the
-    // live version will no longer exist.
+  version_info_ = GetLiveVersionInfo(service_worker_context_, version_id_);
+
+  // if there's no version info, mark the version as destroyed
+  if (!version_info_)
     Destroy();
-  }
 }
 
 void ServiceWorkerMain::OnRunningStatusChanged(
@@ -183,6 +183,14 @@ void ServiceWorkerMain::OnVersionRedundant() {
   // ServiceWorkerMain will need to be created.
   // Set internal state to mark it for deletion once it has fully stopped.
   redundant_ = true;
+
+  // content only broadcasts OnStopped for versions that reached RUNNING;
+  // anything else gets no further running status change, so destroy now.
+  auto* version = GetLiveVersion(service_worker_context_, version_id_);
+  if (!version ||
+      version->running_status() != blink::EmbeddedWorkerStatus::kRunning) {
+    Destroy();
+  }
 }
 
 bool ServiceWorkerMain::IsDestroyed() const {
@@ -238,6 +246,12 @@ void ServiceWorkerMain::FinishExternalRequest(v8::Isolate* isolate,
   content::ServiceWorkerExternalRequestResult result =
       service_worker_context_->FinishedExternalRequest(version_id_,
                                                        request_uuid);
+  // Still release the request above so a doomed worker can stop.
+  if (version_destroyed_) {
+    isolate->ThrowException(v8::Exception::TypeError(
+        gin::StringToV8(isolate, "ServiceWorkerMain is destroyed")));
+    return;
+  }
 
   std::string error;
   switch (result) {
@@ -288,36 +302,33 @@ GURL ServiceWorkerMain::ScriptURL() const {
 }
 
 // static
-gin::Handle<ServiceWorkerMain> ServiceWorkerMain::New(v8::Isolate* isolate) {
-  return gin::Handle<ServiceWorkerMain>();
+ServiceWorkerMain* ServiceWorkerMain::New(v8::Isolate* isolate) {
+  return nullptr;
 }
 
 // static
-gin::Handle<ServiceWorkerMain> ServiceWorkerMain::From(
+ServiceWorkerMain* ServiceWorkerMain::From(
     v8::Isolate* isolate,
     content::ServiceWorkerContext* sw_context,
-    const content::StoragePartition* storage_partition,
+    std::string browser_context_id,
+    content::StoragePartitionConfig storage_partition_config,
     int64_t version_id) {
-  ServiceWorkerKey service_worker_key(version_id, storage_partition);
+  ServiceWorkerKey service_worker_key{std::move(browser_context_id),
+                                      std::move(storage_partition_config),
+                                      version_id};
 
-  auto* service_worker = FromServiceWorkerKey(service_worker_key);
-  if (service_worker)
-    return gin::CreateHandle(isolate, service_worker);
+  if (auto* service_worker = FromServiceWorkerKey(service_worker_key))
+    return service_worker;
 
   // Ensure ServiceWorkerVersion exists and is not redundant (pending deletion)
   auto* live_version = GetLiveVersion(sw_context, version_id);
   if (!live_version || live_version->is_redundant()) {
-    return gin::Handle<ServiceWorkerMain>();
+    return nullptr;
   }
 
-  auto handle = gin::CreateHandle(
-      isolate,
-      new ServiceWorkerMain(sw_context, version_id, service_worker_key));
-
-  // Prevent garbage collection of worker until it has been deleted internally.
-  handle->Pin(isolate);
-
-  return handle;
+  return cppgc::MakeGarbageCollected<ServiceWorkerMain>(
+      isolate->GetCppHeap()->GetAllocationHandle(), sw_context, version_id,
+      std::move(service_worker_key));
 }
 
 // static
@@ -339,8 +350,12 @@ void ServiceWorkerMain::FillObjectTemplate(
       .Build();
 }
 
-const char* ServiceWorkerMain::GetTypeName() {
-  return GetClassName();
+const gin::WrapperInfo* ServiceWorkerMain::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* ServiceWorkerMain::GetHumanReadableName() const {
+  return "Electron / ServiceWorkerMain";
 }
 
 }  // namespace electron::api
@@ -353,9 +368,11 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
-  dict.Set("ServiceWorkerMain", ServiceWorkerMain::GetConstructor(context));
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.Set("ServiceWorkerMain",
+           ServiceWorkerMain::GetConstructor(isolate, context,
+                                             &ServiceWorkerMain::kWrapperInfo));
 }
 
 }  // namespace

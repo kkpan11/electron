@@ -11,13 +11,13 @@
 #include "base/command_line.h"
 #include "base/containers/extend.h"
 #include "base/files/file_util.h"
+#include "base/memory/ref_counted_memory.h"
 #include "base/strings/string_split.h"
-#include "content/public/common/content_constants.h"
+#include "content/public/common/buildflags.h"
 #include "electron/buildflags/buildflags.h"
 #include "electron/fuses.h"
 #include "extensions/common/constants.h"
 #include "pdf/buildflags.h"
-#include "ppapi/buildflags/buildflags.h"
 #include "shell/common/options_switches.h"
 #include "shell/common/process_util.h"
 #include "third_party/widevine/cdm/buildflags.h"
@@ -33,11 +33,12 @@
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
 #include "components/pdf/common/constants.h"  // nogncheck
+#include "components/pdf/common/pdf_util.h"   // nogncheck
 #include "shell/common/electron_constants.h"
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 
 #if BUILDFLAG(ENABLE_PLUGINS)
-#include "content/public/common/content_plugin_info.h"
+#include "content/public/common/webplugininfo.h"
 #endif  // BUILDFLAG(ENABLE_PLUGINS)
 
 namespace electron {
@@ -118,8 +119,8 @@ gfx::Image& ElectronContentClient::GetNativeImageNamed(int resource_id) {
       resource_id);
 }
 
-base::RefCountedMemory* ElectronContentClient::GetDataResourceBytes(
-    int resource_id) {
+scoped_refptr<base::RefCountedMemory>
+ElectronContentClient::GetDataResourceBytes(int resource_id) {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytes(
       resource_id);
 }
@@ -162,22 +163,25 @@ void ElectronContentClient::AddAdditionalSchemes(Schemes* schemes) {
 }
 
 void ElectronContentClient::AddPlugins(
-    std::vector<content::ContentPluginInfo>* plugins) {
+    std::vector<content::WebPluginInfo>* plugins) {
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
+  static constexpr char16_t kPDFPluginName[] = u"Chromium PDF Plugin";
+  static constexpr char16_t kPDFPluginDescription[] = u"Built-in PDF viewer";
   static constexpr char kPDFPluginExtension[] = "pdf";
-  static constexpr char kPDFPluginDescription[] = "Portable Document Format";
+  static constexpr char kPDFPluginExtensionDescription[] =
+      "Portable Document Format";
 
-  content::ContentPluginInfo pdf_info;
-  pdf_info.is_internal = true;
-  pdf_info.is_out_of_process = true;
-  pdf_info.name = kPDFInternalPluginName;
-  pdf_info.description = kPDFPluginDescription;
+  content::WebPluginInfo pdf_info;
+  pdf_info.name = kPDFPluginName;
   // This isn't a real file path; it's just used as a unique identifier.
   static constexpr std::string_view kPdfPluginPath = "internal-pdf-viewer";
   pdf_info.path = base::FilePath::FromASCII(kPdfPluginPath);
-  content::WebPluginMimeType pdf_mime_type(
-      pdf::kInternalPluginMimeType, kPDFPluginExtension, kPDFPluginDescription);
+  pdf_info.desc = kPDFPluginDescription;
+  content::WebPluginMimeType pdf_mime_type(pdf::kInternalPluginMimeType,
+                                           kPDFPluginExtension,
+                                           kPDFPluginExtensionDescription);
   pdf_info.mime_types.push_back(pdf_mime_type);
+  pdf_info.type = content::WebPluginInfo::PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN;
   plugins->push_back(pdf_info);
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 }
@@ -213,6 +217,15 @@ void ElectronContentClient::AddContentDecryptionModules(
     }
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
   }
+}
+
+bool ElectronContentClient::IsFilePickerAllowedForCrossOriginSubframe(
+    const url::Origin& origin) {
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+  return IsPdfExtensionOrigin(origin);
+#else
+  return false;
+#endif
 }
 
 }  // namespace electron

@@ -11,24 +11,31 @@
 #include <utility>
 
 #include "base/apple/bundle_locations.h"
-#include "base/base_switches.h"
 #include "base/command_line.h"
+#include "base/debug/leak_annotations.h"
 #include "base/debug/stack_trace.h"
 #include "base/environment.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/metrics/field_trial.h"
 #include "base/path_service.h"
 #include "base/strings/cstring_view.h"
+#include "base/strings/string_number_conversions.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
+#include "chrome/common/profiler/process_type.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
+#include "components/memory_system/initializer.h"
+#include "components/memory_system/parameters.h"
 #include "content/public/app/initialize_mojo_core.h"
 #include "content/public/common/content_switches.h"
+#include "crypto/hash.h"
 #include "electron/buildflags/buildflags.h"
 #include "electron/fuses.h"
 #include "electron/mas.h"
+#include "electron/snapshot_checksum.h"
 #include "extensions/common/constants.h"
-#include "ipc/ipc_buildflags.h"
+#include "gin/v8_initializer.h"
 #include "sandbox/policy/switches.h"
 #include "services/tracing/public/cpp/stack_sampling/tracing_sampler_profiler.h"
 #include "shell/app/command_line_args.h"
@@ -37,34 +44,38 @@
 #include "shell/browser/electron_gpu_client.h"
 #include "shell/browser/feature_list.h"
 #include "shell/browser/relauncher.h"
-#include "shell/common/application_info.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/logging.h"
-#include "shell/common/options_switches.h"
-#include "shell/common/platform_util.h"
 #include "shell/common/process_util.h"
-#include "shell/common/thread_restrictions.h"
 #include "shell/renderer/electron_renderer_client.h"
 #include "shell/renderer/electron_sandboxed_renderer_client.h"
 #include "shell/utility/electron_content_utility_client.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/base/ui_base_switches.h"
+#include "v8/include/v8-snapshot.h"
 
 #if BUILDFLAG(IS_MAC)
 #include "shell/app/electron_main_delegate_mac.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
 #include "base/win/win_util.h"
 #include "chrome/child/v8_crashpad_support_win.h"
 #endif
 
 #if BUILDFLAG(IS_LINUX)
 #include "base/nix/xdg_util.h"
+#include "ui/gfx/linux/fontconfig_util.h"
+#include "ui/linux/display_server_utils.h"
 #include "v8/include/v8-wasm-trap-handler-posix.h"
 #include "v8/include/v8.h"
 #endif
+
+#if BUILDFLAG(IS_OZONE)
+#include "ui/ozone/public/ozone_platform.h"
+#endif  // BUILDFLAG(IS_OZONE)
 
 #if !IS_MAS_BUILD()
 #include "components/crash/core/app/crash_switches.h"  // nogncheck
@@ -72,7 +83,6 @@
 #include "components/crash/core/common/crash_key.h"
 #include "components/crash/core/common/crash_keys.h"
 #include "shell/app/electron_crash_reporter_client.h"
-#include "shell/browser/api/electron_api_crash_reporter.h"
 #include "shell/common/crash_keys.h"
 #endif
 
@@ -114,98 +124,18 @@ void InvalidParameterHandler(const wchar_t*,
 }
 #endif
 
-// TODO(nornagon): move path provider overriding to its own file in
-// shell/common
-bool ElectronPathProvider(int key, base::FilePath* result) {
-  bool create_dir = false;
-  base::FilePath cur;
-  switch (key) {
-    case chrome::DIR_USER_DATA:
-      if (!base::PathService::Get(DIR_APP_DATA, &cur))
-        return false;
-      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
-          GetPossiblyOverriddenApplicationName()));
-      create_dir = true;
-      break;
-    case DIR_CRASH_DUMPS:
-      if (!base::PathService::Get(chrome::DIR_USER_DATA, &cur))
-        return false;
-      cur = cur.Append(FILE_PATH_LITERAL("Crashpad"));
-      create_dir = true;
-      break;
-    case chrome::DIR_APP_DICTIONARIES:
-      // TODO(nornagon): can we just default to using Chrome's logic here?
-      if (!base::PathService::Get(DIR_SESSION_DATA, &cur))
-        return false;
-      cur = cur.Append(base::FilePath::FromUTF8Unsafe("Dictionaries"));
-      create_dir = true;
-      break;
-    case DIR_SESSION_DATA:
-      // By default and for backward, equivalent to DIR_USER_DATA.
-      return base::PathService::Get(chrome::DIR_USER_DATA, result);
-    case DIR_USER_CACHE: {
-#if BUILDFLAG(IS_POSIX)
-      int parent_key = base::DIR_CACHE;
-#else
-      // On Windows, there's no OS-level centralized location for caches, so
-      // store the cache in the app data directory.
-      int parent_key = base::DIR_ROAMING_APP_DATA;
-#endif
-      if (!base::PathService::Get(parent_key, &cur))
-        return false;
-      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
-          GetPossiblyOverriddenApplicationName()));
-      create_dir = true;
-      break;
-    }
-#if BUILDFLAG(IS_LINUX)
-    case DIR_APP_DATA: {
-      auto env = base::Environment::Create();
-      cur = base::nix::GetXDGDirectory(
-          env.get(), base::nix::kXdgConfigHomeEnvVar, base::nix::kDotConfigDir);
-      break;
-    }
-#endif
-#if BUILDFLAG(IS_WIN)
-    case DIR_RECENT:
-      if (!platform_util::GetFolderPath(DIR_RECENT, &cur))
-        return false;
-      create_dir = true;
-      break;
-#endif
-    case DIR_APP_LOGS:
-#if BUILDFLAG(IS_MAC)
-      if (!base::PathService::Get(base::DIR_HOME, &cur))
-        return false;
-      cur = cur.Append(FILE_PATH_LITERAL("Library"));
-      cur = cur.Append(FILE_PATH_LITERAL("Logs"));
-      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
-          GetPossiblyOverriddenApplicationName()));
-#else
-      if (!base::PathService::Get(chrome::DIR_USER_DATA, &cur))
-        return false;
-      cur = cur.Append(base::FilePath::FromUTF8Unsafe("logs"));
-#endif
-      create_dir = true;
-      break;
-    default:
-      return false;
+void ValidateV8Snapshot(v8::StartupData* data) {
+  if (data->data &&
+      electron::fuses::IsEmbeddedAsarIntegrityValidationEnabled()) {
+    CHECK_GT(data->raw_size, 0);
+    UNSAFE_BUFFERS({
+      base::span<const char> span_data(
+          data->data, static_cast<unsigned long>(data->raw_size));
+      CHECK(base::ToLowerASCII(base::HexEncode(
+                crypto::hash::Sha256(base::as_bytes(span_data)))) ==
+            electron::snapshot_checksum::kChecksum);
+    })
   }
-
-  // TODO(bauerb): http://crbug.com/259796
-  ScopedAllowBlockingForElectron allow_blocking;
-  if (create_dir && !base::PathExists(cur) && !base::CreateDirectory(cur)) {
-    return false;
-  }
-
-  *result = cur;
-
-  return true;
-}
-
-void RegisterPathProvider() {
-  base::PathService::RegisterProvider(ElectronPathProvider, PATH_START,
-                                      PATH_END);
 }
 
 }  // namespace
@@ -220,7 +150,7 @@ std::string LoadResourceBundle(const std::string& locale) {
   pak_dir =
       base::apple::FrameworkBundlePath().Append(FILE_PATH_LITERAL("Resources"));
 #else
-  base::PathService::Get(base::DIR_MODULE, &pak_dir);
+  base::PathService::Get(base::DIR_ASSETS, &pak_dir);
 #endif
 
   std::string loaded_locale = ui::ResourceBundle::InitSharedInstanceWithLocale(
@@ -231,14 +161,19 @@ std::string LoadResourceBundle(const std::string& locale) {
   return loaded_locale;
 }
 
-ElectronMainDelegate::ElectronMainDelegate() = default;
+ElectronMainDelegate::ElectronMainDelegate() {
+  gin::SetV8SnapshotValidator(base::BindRepeating(&ValidateV8Snapshot));
+}
 
 ElectronMainDelegate::~ElectronMainDelegate() = default;
 
-const char* const ElectronMainDelegate::kNonWildcardDomainNonPortSchemes[] = {
-    extensions::kExtensionScheme};
-const size_t ElectronMainDelegate::kNonWildcardDomainNonPortSchemesSize =
-    std::size(kNonWildcardDomainNonPortSchemes);
+// static
+base::span<const char* const>
+ElectronMainDelegate::GetNonWildcardDomainNonPortSchemes() {
+  static const char* const kNonWildcardDomainNonPortSchemes[] = {
+      extensions::kExtensionScheme};
+  return kNonWildcardDomainNonPortSchemes;
+}
 
 std::optional<int> ElectronMainDelegate::BasicStartupComplete() {
   auto* command_line = base::CommandLine::ForCurrentProcess();
@@ -270,7 +205,7 @@ std::optional<int> ElectronMainDelegate::BasicStartupComplete() {
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   ContentSettingsPattern::SetNonWildcardDomainNonPortSchemes(
-      kNonWildcardDomainNonPortSchemes, kNonWildcardDomainNonPortSchemesSize);
+      GetNonWildcardDomainNonPortSchemes());
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -353,6 +288,13 @@ void ElectronMainDelegate::PreSandboxStartup() {
   if (!IsBrowserProcess()) {
     ElectronCrashReporterClient::Create();
     crash_reporter::InitializeCrashpad(false, process_type);
+#if BUILDFLAG(IS_WIN)
+    // The sandbox job (JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION) starts
+    // children with SEM_NOGPFAULTERRORBOX, which keeps Windows Error Reporting
+    // from running the registered helper for crashes crashpad cannot catch
+    // in-process. Crashpad is installed now, so let WER see those.
+    SetErrorMode(GetErrorMode() & ~SEM_NOGPFAULTERRORBOX);
+#endif
   }
 #endif
 
@@ -384,6 +326,15 @@ void ElectronMainDelegate::PreSandboxStartup() {
     // Enable AVFoundation.
     command_line->AppendSwitch("enable-avfoundation");
 #endif
+
+#if BUILDFLAG(IS_OZONE)
+    // Initialize Ozone platform and add required feature flags as per
+    // platform's properties.
+#if BUILDFLAG(IS_LINUX)
+    ui::SetOzonePlatformForLinuxIfNeeded(*command_line);
+#endif
+    ui::OzonePlatform::PreSandboxStartup();
+#endif  // BUILDFLAG(IS_OZONE)
   }
 }
 
@@ -398,9 +349,22 @@ std::optional<int> ElectronMainDelegate::PreBrowserMain() {
   // This is initialized early because the service manager reads some feature
   // flags and we need to make sure the feature list is initialized before the
   // service manager reads the features.
+  if (!base::FieldTrialList::GetInstance()) {
+    // Intentionally never destroyed: the FieldTrialList has to outlive
+    // everything that reads field trials. Storing it in a static keeps the
+    // allocation reachable, both for static analysis and for LeakSanitizer.
+    [[maybe_unused]] static base::FieldTrialList* leaked_field_trial_list =
+        new base::FieldTrialList();
+    ANNOTATE_LEAKING_OBJECT_PTR(leaked_field_trial_list);
+  }
   InitializeFeatureList();
   // Initialize mojo core as soon as we have a valid feature list
   content::InitializeMojoCore();
+#if BUILDFLAG(IS_LINUX)
+  // Queued before the browser ThreadPool starts, so FontConfig loads in
+  // parallel with toolkit initialization instead of on first use.
+  gfx::InitializeGlobalFontConfigAsync();
+#endif
 #if BUILDFLAG(IS_MAC)
   RegisterAtomCrApp();
 #endif
@@ -410,6 +374,31 @@ std::optional<int> ElectronMainDelegate::PreBrowserMain() {
   base::nix::ExtractXdgActivationTokenFromEnv(*env);
 #endif
   return std::nullopt;
+}
+
+std::optional<int> ElectronMainDelegate::PostEarlyInitialization(
+    InvokedIn invoked_in) {
+  // Start memory observation as early as possible so it can start recording
+  // memory allocations.
+  InitializeMemorySystem();
+
+  return std::nullopt;
+}
+
+void ElectronMainDelegate::InitializeMemorySystem() {
+  const base::CommandLine* const command_line =
+      base::CommandLine::ForCurrentProcess();
+  const std::string process_type =
+      command_line->GetSwitchValueASCII(::switches::kProcessType);
+
+  // PoissonAllocationSampler is necessary for heap profiling.
+  memory_system::Initializer()
+      .SetDispatcherParameters(memory_system::DispatcherParameters::
+                                   PoissonAllocationSamplerInclusion::kEnforce,
+                               memory_system::DispatcherParameters::
+                                   AllocationTraceRecorderInclusion::kIgnore,
+                               process_type)
+      .Initialize(memory_system_);
 }
 
 std::string_view ElectronMainDelegate::GetBrowserV8SnapshotFilename() {
@@ -472,6 +461,15 @@ bool ElectronMainDelegate::ShouldCreateFeatureList(InvokedIn invoked_in) {
 
 bool ElectronMainDelegate::ShouldInitializeMojo(InvokedIn invoked_in) {
   return ShouldCreateFeatureList(invoked_in);
+}
+
+bool ElectronMainDelegate::ShouldLoadV8Snapshot(
+    const std::string& process_type) {
+  // The gpu does not need v8
+  if (process_type == ::switches::kGpuProcess) {
+    return false;
+  }
+  return true;
 }
 
 bool ElectronMainDelegate::ShouldLockSchemeRegistry() {

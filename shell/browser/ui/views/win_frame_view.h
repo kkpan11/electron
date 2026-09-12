@@ -23,18 +23,21 @@ class WinFrameView : public FramelessView {
   METADATA_HEADER(WinFrameView, FramelessView)
 
  public:
-  WinFrameView();
+  WinFrameView(NativeWindowViews* window, views::Widget* frame);
   ~WinFrameView() override;
 
-  void Init(NativeWindowViews* window, views::Widget* frame) override;
   void InvalidateCaptionButtons() override;
 
-  SkColor GetReadableFeatureColor(SkColor background_color);
-
-  // views::NonClientFrameView:
+  // views::FrameView:
   gfx::Rect GetWindowBoundsForClientBounds(
       const gfx::Rect& client_bounds) const override;
   int NonClientHitTest(const gfx::Point& point) override;
+  gfx::Size GetMinimumSize() const override;
+  gfx::Size GetMaximumSize() const override;
+
+  // views::FramelessView:
+  int ResizingBorderHitTest(const gfx::Point& point) override;
+  gfx::Insets RestoredFrameBorderInsets() const override;
 
   WinCaptionButtonContainer* caption_button_container() {
     return caption_button_container_;
@@ -45,6 +48,9 @@ class WinFrameView : public FramelessView {
   // Visual height of the titlebar when the window is maximized (i.e. excluding
   // the area above the top of the screen).
   int TitlebarMaximizedVisualHeight() const;
+
+  // Returns true if the frame should be painted as active.
+  [[nodiscard]] bool GetShouldPaintAsActive() const;
 
  protected:
   // views::View:

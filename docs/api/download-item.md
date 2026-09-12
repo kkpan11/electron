@@ -12,6 +12,7 @@ control the download item.
 ```js
 // In the main process.
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow()
 win.webContents.session.on('will-download', (event, item, webContents) => {
   // Set the save path, making Electron not to prompt a save dialog.
@@ -115,7 +116,8 @@ Returns `boolean` - Whether the download is paused.
 
 Resumes the download that has been paused.
 
-**Note:** To enable resumable downloads the server you are downloading from must support range requests and provide both `Last-Modified` and `ETag` header values. Otherwise `resume()` will dismiss previously received bytes and restart the download from the beginning.
+> [!NOTE]
+> To enable resumable downloads the server you are downloading from must support range requests and provide both `Last-Modified` and `ETag` header values. Otherwise `resume()` will dismiss previously received bytes and restart the download from the beginning.
 
 #### `downloadItem.canResume()`
 
@@ -137,13 +139,30 @@ Returns `string` - The files mime type.
 
 Returns `boolean` - Whether the download has user gesture.
 
+#### `downloadItem.getInitiatorOrigin()`
+
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/53685
+```
+-->
+
+Returns `string` - The origin that started the download (for example
+`https://example.com`, or `null` for an opaque origin), or an empty string if
+the download was not started by web content (for example
+`webContents.downloadURL()`). Use this rather than `getURL()` or the
+`webContents` to decide whose download it is: the URL is chosen by the
+initiator and the `webContents` is the whole tab.
+
 #### `downloadItem.getFilename()`
 
 Returns `string` - The file name of the download item.
 
-**Note:** The file name is not always the same as the actual one saved in local
-disk. If user changes the file name in a prompted download saving dialog, the
-actual name of saved file will be different.
+> [!NOTE]
+> The file name is not always the same as the actual one saved in local
+> disk. If user changes the file name in a prompted download saving dialog, the
+> actual name of saved file will be different.
 
 #### `downloadItem.getCurrentBytesPerSecond()`
 
@@ -172,8 +191,9 @@ header.
 
 Returns `string` - The current state. Can be `progressing`, `completed`, `cancelled` or `interrupted`.
 
-**Note:** The following methods are useful specifically to resume a
-`cancelled` item when session is restarted.
+> [!NOTE]
+> The following methods are useful specifically to resume a
+> `cancelled` item when session is restarted.
 
 #### `downloadItem.getURLChain()`
 

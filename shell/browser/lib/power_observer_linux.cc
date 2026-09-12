@@ -4,16 +4,16 @@
 #include "shell/browser/lib/power_observer_linux.h"
 
 #include <unistd.h>
-#include <uv.h>
 #include <utility>
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "components/dbus/thread_linux/dbus_thread_linux.h"
 #include "device/bluetooth/dbus/bluez_dbus_manager.h"
-#include "device/bluetooth/dbus/bluez_dbus_thread_manager.h"
 #include "device/bluetooth/dbus/dbus_bluez_manager_wrapper_linux.h"
+#include "shell/common/uv_includes.h"
 
 namespace {
 
@@ -39,7 +39,7 @@ PowerObserverLinux::PowerObserverLinux(
   if (!bluez::BluezDBusManager::IsInitialized())
     bluez::DBusBluezManagerWrapperLinux::Initialize();
 
-  auto* bus = bluez::BluezDBusThreadManager::Get()->GetSystemBus();
+  auto bus = dbus_thread_linux::GetSharedSystemBus();
   if (!bus) {
     LOG(WARNING) << "Failed to get system bus connection";
     return;

@@ -5,20 +5,16 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_REPLY_CHANNEL_H_
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_REPLY_CHANNEL_H_
 
+#include <string_view>
+
 #include "gin/wrappable.h"
 #include "shell/common/api/api.mojom.h"
-
-namespace gin {
-template <typename T>
-class Handle;
-}  // namespace gin
+#include "v8/include/cppgc/prefinalizer.h"
 
 namespace v8 {
 class Isolate;
 template <typename T>
 class Local;
-class Object;
-class ObjectTemplate;
 }  // namespace v8
 
 namespace gin_helper::internal {
@@ -27,22 +23,41 @@ namespace gin_helper::internal {
 // still call the callback and send an error. Not doing so causes a Mojo DCHECK,
 // since Mojo requires callbacks to be called before they are destroyed.
 class ReplyChannel : public gin::Wrappable<ReplyChannel> {
+  CPPGC_USING_PRE_FINALIZER(ReplyChannel, EnsureReplySent);
+
  public:
   using InvokeCallback = electron::mojom::ElectronApiIPC::InvokeCallback;
-  static gin::Handle<ReplyChannel> Create(v8::Isolate* isolate,
-                                          InvokeCallback callback);
 
-  // gin::Wrappable
-  static gin::WrapperInfo kWrapperInfo;
+  static ReplyChannel* Create(v8::Isolate* isolate, InvokeCallback callback);
+
+  // Constructor is public only to satisfy cppgc::MakeGarbageCollected.
+  // Callers should use Create() instead.
+  explicit ReplyChannel(v8::Isolate* isolate, InvokeCallback callback);
+  ~ReplyChannel() override;
+
+  // disable copy
+  ReplyChannel(const ReplyChannel&) = delete;
+  ReplyChannel& operator=(const ReplyChannel&) = delete;
+
+  // gin_helper::Wrappable
+  static const gin::WrapperInfo kWrapperInfo;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
 
-  void SendError(const std::string& msg);
+  // Invokes `callback` (if it's non-null) with `errmsg` as an arg.
+  static void SendError(v8::Isolate* isolate,
+                        InvokeCallback callback,
+                        std::string_view errmsg);
+
+  void EnsureReplySent();
 
  private:
-  explicit ReplyChannel(InvokeCallback callback);
-  ~ReplyChannel() override;
+  // |callback| is left untouched if |arg| cannot be serialized.
+  static bool SendReplyImpl(v8::Isolate* isolate,
+                            InvokeCallback& callback,
+                            v8::Local<v8::Value> arg);
 
   bool SendReply(v8::Isolate* isolate, v8::Local<v8::Value> arg);
 

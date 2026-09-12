@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "base/logging.h"
 #include "components/update_client/update_query_params.h"
 #include "extensions/common/api/runtime.h"
 #include "shell/browser/extensions/electron_extension_system.h"
@@ -68,18 +69,6 @@ bool ElectronRuntimeAPIDelegate::GetPlatformInfo(PlatformInfo* info) {
     info->arch = extensions::api::runtime::PlatformArch::kX86_32;
   } else if (arch == "x64") {
     info->arch = extensions::api::runtime::PlatformArch::kX86_64;
-  } else {
-    NOTREACHED();
-  }
-
-  if (const std::string_view nacl_arch =
-          update_client::UpdateQueryParams::GetNaclArch();
-      nacl_arch == "arm") {
-    info->nacl_arch = extensions::api::runtime::PlatformNaclArch::kArm;
-  } else if (nacl_arch == "x86-32") {
-    info->nacl_arch = extensions::api::runtime::PlatformNaclArch::kX86_32;
-  } else if (nacl_arch == "x86-64") {
-    info->nacl_arch = extensions::api::runtime::PlatformNaclArch::kX86_64;
   } else {
     NOTREACHED();
   }

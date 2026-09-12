@@ -4,12 +4,22 @@
 
 #include <vector>
 
-#include "gin/handle.h"
+#include "build/build_config.h"
 #include "shell/common/asar/archive.h"
 #include "shell/common/asar/asar_util.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/node_includes.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#else
+#include <fcntl.h>
+
+#include "base/posix/eintr_wrapper.h"
+#endif
 
 namespace {
 
@@ -83,17 +93,20 @@ class Archive : public node::ObjectWrap {
     dict.Set("size", info.size);
     dict.Set("unpacked", info.unpacked);
     dict.Set("offset", info.offset);
+    dict.Set("executable", info.executable);
     if (info.integrity.has_value()) {
+      const asar::IntegrityPayload& payload = info.integrity.value();
       gin_helper::Dictionary integrity(isolate, v8::Object::New(isolate));
-      asar::HashAlgorithm algorithm = info.integrity.value().algorithm;
-      switch (algorithm) {
+      switch (payload.algorithm) {
         case asar::HashAlgorithm::kSHA256:
           integrity.Set("algorithm", "SHA256");
           break;
         case asar::HashAlgorithm::kNone:
           NOTREACHED();
       }
-      integrity.Set("hash", info.integrity.value().hash);
+      integrity.Set("hash", payload.hash);
+      integrity.Set("blockSize", payload.block_size);
+      integrity.Set("blocks", payload.blocks);
       dict.Set("integrity", integrity);
     }
     args.GetReturnValue().Set(dict.GetHandle());
@@ -119,6 +132,7 @@ class Archive : public node::ObjectWrap {
     dict.Set("size", stats.size);
     dict.Set("offset", stats.offset);
     dict.Set("type", static_cast<int>(stats.type));
+    dict.Set("executable", stats.executable);
     args.GetReturnValue().Set(dict.GetHandle());
   }
 
@@ -188,16 +202,54 @@ class Archive : public node::ObjectWrap {
   std::shared_ptr<asar::Archive> archive_;
 };
 
+// Returns a new, caller-owned, non-inheritable file descriptor that refers
+// to the null device opened write-only, or -1 on failure.
+//
+// The fs wrapper hands one of these out for every open() of a packed entry
+// and keeps the mapping from it to the entry on the JavaScript side, so the
+// descriptor a caller sees is only meaningful through Node's fs module. Code
+// that reads the raw descriptor itself (a native addon, a child's stdio, a
+// socket, ...) fails with EBADF instead of being handed bytes of the archive
+// at the wrong offset, and no handle to the archive itself ever escapes.
+static void CreateSentinelFd(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  auto* isolate = args.GetIsolate();
+#if BUILDFLAG(IS_WIN)
+  static const HANDLE null_device =
+      ::CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  int fd = -1;
+  if (null_device != INVALID_HANDLE_VALUE) {
+    HANDLE handle = nullptr;
+    if (::DuplicateHandle(::GetCurrentProcess(), null_device,
+                          ::GetCurrentProcess(), &handle, 0,
+                          /*bInheritHandle=*/FALSE, DUPLICATE_SAME_ACCESS)) {
+      fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_WRONLY);
+      if (fd == -1)
+        ::CloseHandle(handle);
+    }
+  }
+#else
+  static const int null_device =
+      HANDLE_EINTR(open("/dev/null", O_WRONLY | O_CLOEXEC));
+  int fd = -1;
+  if (null_device >= 0)
+    fd = HANDLE_EINTR(fcntl(null_device, F_DUPFD_CLOEXEC, 0));
+#endif
+  args.GetReturnValue().Set(gin::ConvertToV8(isolate, fd));
+}
+
 static void SplitPath(const v8::FunctionCallbackInfo<v8::Value>& args) {
   auto* isolate = args.GetIsolate();
 
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  args.GetReturnValue().Set(dict.GetHandle());
+
   base::FilePath path;
   if (!gin::ConvertFromV8(isolate, args[0], &path)) {
-    args.GetReturnValue().Set(v8::False(isolate));
+    dict.Set("isAsar", false);
     return;
   }
 
-  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   base::FilePath asar_path, file_path;
   if (asar::GetAsarArchivePath(path, &asar_path, &file_path, true)) {
     dict.Set("isAsar", true);
@@ -206,14 +258,13 @@ static void SplitPath(const v8::FunctionCallbackInfo<v8::Value>& args) {
   } else {
     dict.Set("isAsar", false);
   }
-  args.GetReturnValue().Set(dict.GetHandle());
 }
 
 void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  auto* isolate = exports->GetIsolate();
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
 
   auto cons = Archive::CreateFunctionTemplate(isolate)
                   ->GetFunction(context)
@@ -223,6 +274,7 @@ void Initialize(v8::Local<v8::Object> exports,
   exports->Set(context, node::FIXED_ONE_BYTE_STRING(isolate, "Archive"), cons)
       .Check();
   NODE_SET_METHOD(exports, "splitPath", &SplitPath);
+  NODE_SET_METHOD(exports, "createSentinelFd", &CreateSentinelFd);
 }
 
 }  // namespace

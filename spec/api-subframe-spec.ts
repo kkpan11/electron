@@ -35,26 +35,21 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const detailsPromise = emittedNTimes(ipcMain, 'preload-ran', 2);
         w.loadFile(path.resolve(__dirname, `fixtures/sub-frames/frame-container${fixtureSuffix}.html`));
         const [event1, event2] = await detailsPromise;
-        expect(event1[0].frameId).to.not.equal(event2[0].frameId);
-        expect(event1[0].frameId).to.equal(event1[2]);
-        expect(event2[0].frameId).to.equal(event2[2]);
-        expect(event1[0].senderFrame.routingId).to.equal(event1[2]);
-        expect(event2[0].senderFrame.routingId).to.equal(event2[2]);
+        expect(event1[0].senderFrame.frameToken).to.not.equal(event2[0].senderFrame.frameToken);
+        expect(event1[0].senderFrame.frameToken).to.equal(event1[2]);
+        expect(event2[0].senderFrame.frameToken).to.equal(event2[2]);
       });
 
       it('should load preload scripts in nested iframes', async () => {
         const detailsPromise = emittedNTimes(ipcMain, 'preload-ran', 3);
         w.loadFile(path.resolve(__dirname, `fixtures/sub-frames/frame-with-frame-container${fixtureSuffix}.html`));
         const [event1, event2, event3] = await detailsPromise;
-        expect(event1[0].frameId).to.not.equal(event2[0].frameId);
-        expect(event1[0].frameId).to.not.equal(event3[0].frameId);
-        expect(event2[0].frameId).to.not.equal(event3[0].frameId);
-        expect(event1[0].frameId).to.equal(event1[2]);
-        expect(event2[0].frameId).to.equal(event2[2]);
-        expect(event3[0].frameId).to.equal(event3[2]);
-        expect(event1[0].senderFrame.routingId).to.equal(event1[2]);
-        expect(event2[0].senderFrame.routingId).to.equal(event2[2]);
-        expect(event3[0].senderFrame.routingId).to.equal(event3[2]);
+        expect(event1[0].senderFrame.frameToken).to.not.equal(event2[0].senderFrame.frameToken);
+        expect(event1[0].senderFrame.frameToken).to.not.equal(event3[0].senderFrame.frameToken);
+        expect(event2[0].senderFrame.frameToken).to.not.equal(event3[0].senderFrame.frameToken);
+        expect(event1[0].senderFrame.frameToken).to.equal(event1[2]);
+        expect(event2[0].senderFrame.frameToken).to.equal(event2[2]);
+        expect(event3[0].senderFrame.frameToken).to.equal(event3[2]);
       });
 
       it('should correctly reply to the main frame with using event.reply', async () => {
@@ -63,8 +58,8 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [event1] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event1[0].reply('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event1[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event1[0].senderFrame.frameToken);
       });
 
       it('should correctly reply to the main frame with using event.senderFrame.send', async () => {
@@ -73,8 +68,8 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [event1] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event1[0].senderFrame.send('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event1[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event1[0].senderFrame.frameToken);
       });
 
       it('should correctly reply to the sub-frames with using event.reply', async () => {
@@ -83,8 +78,8 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [, event2] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event2[0].reply('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event2[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event2[0].senderFrame.frameToken);
       });
 
       it('should correctly reply to the sub-frames with using event.senderFrame.send', async () => {
@@ -93,8 +88,8 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [, event2] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event2[0].senderFrame.send('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event2[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event2[0].senderFrame.frameToken);
       });
 
       it('should correctly reply to the nested sub-frames with using event.reply', async () => {
@@ -103,8 +98,8 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [, , event3] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event3[0].reply('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event3[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event3[0].senderFrame.frameToken);
       });
 
       it('should correctly reply to the nested sub-frames with using event.senderFrame.send', async () => {
@@ -113,16 +108,18 @@ describe('renderer nodeIntegrationInSubFrames', () => {
         const [, , event3] = await detailsPromise;
         const pongPromise = once(ipcMain, 'preload-pong');
         event3[0].senderFrame.send('preload-ping');
-        const [, frameId] = await pongPromise;
-        expect(frameId).to.equal(event3[0].frameId);
+        const [, frameToken] = await pongPromise;
+        expect(frameToken).to.equal(event3[0].senderFrame.frameToken);
       });
 
       it('should not expose globals in main world', async () => {
         const detailsPromise = emittedNTimes(ipcMain, 'preload-ran', 2);
         w.loadFile(path.resolve(__dirname, `fixtures/sub-frames/frame-container${fixtureSuffix}.html`));
         const details = await detailsPromise;
-        const senders = details.map(event => event[0].sender);
-        const isolatedGlobals = await Promise.all(senders.map(sender => sender.executeJavaScript('window.isolatedGlobal')));
+        const senders = details.map((event) => event[0].sender);
+        const isolatedGlobals = await Promise.all(
+          senders.map((sender) => sender.executeJavaScript('window.isolatedGlobal'))
+        );
         for (const result of isolatedGlobals) {
           if (webPreferences.contextIsolation === undefined || webPreferences.contextIsolation) {
             expect(result).to.be.undefined();
@@ -134,14 +131,13 @@ describe('renderer nodeIntegrationInSubFrames', () => {
     });
   };
 
-  const generateConfigs = (webPreferences: any, ...permutations: {name: string, webPreferences: any}[]) => {
+  const generateConfigs = (webPreferences: any, ...permutations: { name: string; webPreferences: any }[]) => {
     const configs = [{ webPreferences, names: [] as string[] }];
     for (const permutation of permutations) {
       const length = configs.length;
       for (let j = 0; j < length; j++) {
         const newConfig = Object.assign({}, configs[j]);
-        newConfig.webPreferences = Object.assign({},
-          newConfig.webPreferences, permutation.webPreferences);
+        newConfig.webPreferences = Object.assign({}, newConfig.webPreferences, permutation.webPreferences);
         newConfig.names = newConfig.names.slice(0);
         newConfig.names.push(permutation.name);
         configs.push(newConfig);
@@ -156,7 +152,7 @@ describe('renderer nodeIntegrationInSubFrames', () => {
       }
       delete config.names;
 
-      return config as {title: string, webPreferences: any};
+      return config as { title: string; webPreferences: any };
     });
   };
 
@@ -288,11 +284,11 @@ ifdescribe(process.platform !== 'linux')('cross-site frame sandboxing', () => {
         await w.loadURL(serverUrl);
 
         const pidMain = w.webContents.getOSProcessId();
-        const pidFrame = w.webContents.mainFrame.frames.find(f => f.name === 'frame')!.osProcessId;
+        const pidFrame = w.webContents.mainFrame.frames.find((f) => f.name === 'frame')!.osProcessId;
 
         const metrics = app.getAppMetrics();
         const isProcessSandboxed = function (pid: number) {
-          const entry = metrics.find(metric => metric.pid === pid);
+          const entry = metrics.find((metric) => metric.pid === pid);
           return entry && entry.sandboxed;
         };
 

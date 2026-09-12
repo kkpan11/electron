@@ -7,6 +7,7 @@
 
 #include "shell/browser/ui/message_box.h"
 
+#include "base/check.h"
 #include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
@@ -20,9 +21,11 @@
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/gtk_util.h"
 #include "ui/base/glib/scoped_gsignal.h"
+#include "ui/color/system_theme.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gtk/gtk_ui.h"    // nogncheck
 #include "ui/gtk/gtk_util.h"  // nogncheck
+#include "ui/linux/linux_ui_factory.h"
 
 #if defined(USE_OZONE)
 #include "ui/base/ui_base_features.h"
@@ -42,12 +45,22 @@ base::flat_map<int, GtkWidget*>& GetDialogsMap() {
   return *dialogs;
 }
 
+gtk::GtkUiPlatform* GetGtkUiPlatform() {
+  auto* gtk_ui =
+      static_cast<gtk::GtkUi*>(ui::GetLinuxUiTheme(ui::SystemTheme::kGtk));
+  CHECK(gtk_ui);
+  gtk::GtkUiPlatform* platform = gtk_ui->GetPlatform();
+  CHECK(platform);
+  return platform;
+}
+
 class GtkMessageBox : private NativeWindowObserver {
  public:
   explicit GtkMessageBox(const MessageBoxSettings& settings)
       : id_(settings.id),
         cancel_id_(settings.cancel_id),
-        parent_(static_cast<NativeWindow*>(settings.parent_window)) {
+        parent_(static_cast<NativeWindow*>(settings.parent_window)),
+        platform_(GetGtkUiPlatform()) {
     // Create dialog.
     dialog_ =
         gtk_message_dialog_new(nullptr,                         // parent
@@ -109,7 +122,8 @@ class GtkMessageBox : private NativeWindowObserver {
     if (parent_) {
       parent_->AddObserver(this);
       static_cast<NativeWindowViews*>(parent_)->SetEnabled(false);
-      gtk::SetGtkTransientForAura(dialog_, parent_->GetNativeWindow());
+      gtk::SetGtkTransientForAura(dialog_, parent_->GetNativeWindow(),
+                                  platform_);
       gtk_window_set_modal(GTK_WINDOW(dialog_), TRUE);
     }
   }
@@ -160,7 +174,7 @@ class GtkMessageBox : private NativeWindowObserver {
 
   void Show() {
     gtk_widget_show(dialog_);
-    gtk::GtkUi::GetPlatform()->ShowGtkWindow(GTK_WINDOW(dialog_));
+    platform_->ShowGtkWindow(GTK_WINDOW(dialog_));
   }
 
   int RunSynchronous() {
@@ -202,6 +216,7 @@ class GtkMessageBox : private NativeWindowObserver {
   RAW_PTR_EXCLUSION GtkWidget* dialog_;
   MessageBoxCallback callback_;
   std::vector<ScopedGSignal> signals_;
+  raw_ptr<gtk::GtkUiPlatform> platform_;
 };
 
 void GtkMessageBox::OnResponseDialog(GtkWidget* widget, int response) {

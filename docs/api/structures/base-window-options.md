@@ -29,7 +29,7 @@
   stop interacting with wm, so the window will always stay on top in all
   workspaces.
 * `alwaysOnTop` boolean (optional) - Whether the window should always stay on top of
-  other windows. Default is `false`.
+  other windows. Default is `false`. Not supported on Wayland (Linux).
 * `fullscreen` boolean (optional) - Whether the window should show in fullscreen. When
   explicitly set to `false` the fullscreen button will be hidden or disabled
   on macOS. Default is `false`.
@@ -42,6 +42,8 @@
   Default is `false`.
 * `hiddenInMissionControl` boolean (optional) _macOS_ - Whether window should be hidden when the user toggles into mission control.
 * `kiosk` boolean (optional) - Whether the window is in kiosk mode. Default is `false`.
+* `name` string (optional) - A unique identifier for the window, used internally by Electron to enable features such as state persistence. Each window must have a distinct name. It can only be reused after the corresponding window has been destroyed. An error is thrown if the name is already in use. This is not the visible title shown to users on the title bar.
+* `windowStatePersistence` ([WindowStatePersistence](window-state-persistence.md) | boolean) (optional) - Configures or enables the persistence of window state (position, size, maximized state, etc.) across application restarts. Has no effect if window `name` is not provided. Automatically disabled when there is no available display. _Experimental_
 * `title` string (optional) - Default window title. Default is `"Electron"`. If the HTML tag `<title>` is defined in the HTML file loaded by `loadURL()`, this property will be ignored.
 * `icon` ([NativeImage](../native-image.md) | string) (optional) - The window icon. On Windows it is
   recommended to use `ICO` icons to get best visual effects, you can also
@@ -72,6 +74,9 @@
   some GTK+3 desktop environments. Default is `false`.
 * `transparent` boolean (optional) - Makes the window [transparent](../../tutorial/custom-window-styles.md#transparent-windows).
   Default is `false`. On Windows, does not work unless the window is frameless.
+  When you add a [`View`](../view.md) to a `BaseWindow`, you'll need to call
+  [`view.setBackgroundColor`](../view.md#viewsetbackgroundcolorcolor) with a transparent
+  background color on that view to make its background transparent as well.
 * `type` string (optional) - The type of window, default is normal window. See more about
   this below.
 * `visualEffectState` string (optional) _macOS_ - Specify how the material
@@ -91,19 +96,22 @@
     title bar and a full size content window, the traffic light buttons will
     display when being hovered over in the top left of the window.
     **Note:** This option is currently experimental.
-* `titleBarOverlay` Object | Boolean (optional) -  When using a frameless window in conjunction with `win.setWindowButtonVisibility(true)` on macOS or using a `titleBarStyle` so that the standard window controls ("traffic lights" on macOS) are visible, this property enables the Window Controls Overlay [JavaScript APIs][overlay-javascript-apis] and [CSS Environment Variables][overlay-css-env-vars]. Specifying `true` will result in an overlay with default system colors. Default is `false`.
+* `titleBarOverlay` Object | boolean (optional) -  When using a frameless window in conjunction with `win.setWindowButtonVisibility(true)` on macOS or using a `titleBarStyle` so that the standard window controls ("traffic lights" on macOS) are visible, this property enables the Window Controls Overlay [JavaScript APIs][overlay-javascript-apis] and [CSS Environment Variables][overlay-css-env-vars]. Specifying `true` will result in an overlay with default system colors. Default is `false`.
   * `color` String (optional) _Windows_ _Linux_ - The CSS color of the Window Controls Overlay when enabled. Default is the system color.
   * `symbolColor` String (optional) _Windows_ _Linux_ - The CSS color of the symbols on the Window Controls Overlay when enabled. Default is the system color.
   * `height` Integer (optional) - The height of the title bar and Window Controls Overlay in pixels. Default is system height.
+* `accentColor` boolean | string (optional) _Windows_ - The accent color for the window. By default, follows user preference in System Settings. Set to `false` to explicitly disable, or set the color in Hex, RGB, RGBA, HSL, HSLA or named CSS color format. Alpha values will be ignored.
 * `trafficLightPosition` [Point](point.md) (optional) _macOS_ -
   Set a custom position for the traffic light buttons in frameless windows.
-* `roundedCorners` boolean (optional) _macOS_ _Windows_ - Whether frameless window
-  should have rounded corners. Default is `true`. Setting this property
-  to `false` will prevent the window from being fullscreenable on macOS.
-  On Windows versions older than Windows 11 Build 22000 this property has no effect, and frameless windows will not have rounded corners.
-* `thickFrame` boolean (optional) - Use `WS_THICKFRAME` style for frameless windows on
-  Windows, which adds standard window frame. Setting it to `false` will remove
-  window shadow and window animations. Default is `true`.
+* `roundedCorners` boolean (optional) - Whether a frameless window
+  should have rounded corners. Default is `true`. On Windows versions older than
+  Windows 11 Build 22000 this property has no effect, and frameless windows will
+  not have rounded corners. On Linux, rounded corners are only drawn when the
+  desktop environment supports client-side decorations.
+* `thickFrame` boolean (optional) _Windows_ - Use `WS_THICKFRAME` style for
+  frameless windows on Windows, which adds the standard window frame. Setting it
+  to `false` will remove window shadow and window animations, and disable window
+  resizing via dragging the window edges. Default is `true`.
 * `vibrancy` string (optional) _macOS_ - Add a type of vibrancy effect to
   the window, only on macOS. Can be `appearance-based`, `titlebar`, `selection`,
   `menu`, `popover`, `sidebar`, `header`, `sheet`, `window`, `hud`, `fullscreen-ui`,

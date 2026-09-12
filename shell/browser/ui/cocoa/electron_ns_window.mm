@@ -25,7 +25,6 @@ int ScopedDisableResize::disable_resize_ = 0;
 }  // namespace electron
 
 @interface NSWindow (PrivateAPI)
-- (NSImage*)_cornerMask;
 - (int64_t)_resizeDirectionForMouseLocation:(CGPoint)location;
 @end
 
@@ -35,6 +34,41 @@ int ScopedDisableResize::disable_resize_ = 0;
 @end
 
 typedef void (*MouseDownImpl)(id, SEL, NSEvent*);
+
+// Work around an Apple bug where the visual tab picker's
+// grid animation creates NSLayoutConstraints against nil layout anchors,
+// crashing in NSVisualTabPickerShadowTileView. This happens when a new tabbed
+// window is created while the tab picker is open — the "+" tile (and possibly
+// others) have broken internal state. Rather than patching individual tile
+// animation methods, short-circuit the entire grid animation by swizzling
+// NSVisualTabPickerGridView's -startGridAnimation:completionHandler: to
+// immediately invoke the completion handler without running the animation.
+typedef void (*StartGridAnimationIMP)(id, SEL, id, id);
+static StartGridAnimationIMP g_orig_startGridAnimation = nullptr;
+
+static void Patched_startGridAnimation(id self,
+                                       SEL _cmd,
+                                       id animation,
+                                       void (^completionHandler)()) {
+  if (completionHandler)
+    completionHandler();
+}
+
+static void SwizzleTabPickerGridAnimation() {
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    Class cls = NSClassFromString(@"NSVisualTabPickerGridView");
+    if (!cls)
+      return;
+    SEL sel = @selector(startGridAnimation:completionHandler:);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method)
+      return;
+    g_orig_startGridAnimation =
+        (StartGridAnimationIMP)method_getImplementation(method);
+    method_setImplementation(method, (IMP)Patched_startGridAnimation);
+  });
+}
 
 namespace {
 MouseDownImpl g_nsthemeframe_mousedown;
@@ -49,29 +83,26 @@ MouseDownImpl g_nsnextstepframe_mousedown;
 @implementation SwizzledMethodsClass
 - (void)swiz_nsthemeframe_mouseDown:(NSEvent*)event {
   if ([self.window respondsToSelector:@selector(shell)]) {
-    electron::NativeWindowMac* shell =
-        (electron::NativeWindowMac*)[(id)self.window shell];
+    electron::NativeWindowMac* shell = [(id)self.window shell];
     if (shell && !shell->has_frame())
       [self cr_mouseDownOnFrameView:event];
-    g_nsthemeframe_mousedown(self, @selector(mouseDown:), event);
   }
+  g_nsthemeframe_mousedown(self, @selector(mouseDown:), event);
 }
 
 - (void)swiz_nsnextstepframe_mouseDown:(NSEvent*)event {
   if ([self.window respondsToSelector:@selector(shell)]) {
-    electron::NativeWindowMac* shell =
-        (electron::NativeWindowMac*)[(id)self.window shell];
+    electron::NativeWindowMac* shell = [(id)self.window shell];
     if (shell && !shell->has_frame()) {
       [self cr_mouseDownOnFrameView:event];
     }
-    g_nsnextstepframe_mousedown(self, @selector(mouseDown:), event);
   }
+  g_nsnextstepframe_mousedown(self, @selector(mouseDown:), event);
 }
 
 - (void)swiz_nsview_swipeWithEvent:(NSEvent*)event {
   if ([self.window respondsToSelector:@selector(shell)]) {
-    electron::NativeWindowMac* shell =
-        (electron::NativeWindowMac*)[(id)self.window shell];
+    electron::NativeWindowMac* shell = [(id)self.window shell];
     if (shell) {
       if (event.deltaY == 1.0) {
         shell->NotifyWindowSwipe("up");
@@ -109,6 +140,8 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
       class_getInstanceMethod([view class], @selector(swipeWithEvent:));
   Method new_swipe_with_event =
       class_getInstanceMethod([SwizzledMethodsClass class], swiz_selector);
+  CHECK(original_swipe_with_event);
+  CHECK(new_swipe_with_event);
   method_setImplementation(original_swipe_with_event,
                            method_getImplementation(new_swipe_with_event));
 }
@@ -123,10 +156,10 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 @synthesize disableAutoHideCursor;
 @synthesize disableKeyOrMainWindow;
 @synthesize vibrantView;
-@synthesize cornerMask;
 
 - (id)initWithShell:(electron::NativeWindowMac*)shell
           styleMask:(NSUInteger)styleMask {
+  SwizzleTabPickerGridAnimation();
   if ((self = [super initWithContentRect:ui::kWindowSizeDeterminedLater
                                styleMask:styleMask
                                  backing:NSBackingStoreBuffered
@@ -173,10 +206,8 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (id)accessibilityFocusedUIElement {
-  views::Widget* widget = shell_->widget();
-  id superFocus = [super accessibilityFocusedUIElement];
-  if (!widget || shell_->IsFocused())
-    return superFocus;
+  if (!shell_ || !shell_->widget() || shell_->IsFocused())
+    return [super accessibilityFocusedUIElement];
   return nil;
 }
 - (NSRect)originalContentRectForFrameRect:(NSRect)frameRect {
@@ -184,7 +215,7 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (NSTouchBar*)makeTouchBar {
-  if (shell_->touch_bar())
+  if (shell_ && shell_->touch_bar())
     return [shell_->touch_bar() makeTouchBar];
   else
     return nil;
@@ -214,11 +245,12 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (void)rotateWithEvent:(NSEvent*)event {
-  shell_->NotifyWindowRotateGesture(event.rotation);
+  if (shell_)
+    shell_->NotifyWindowRotateGesture(event.rotation);
 }
 
 - (NSRect)contentRectForFrameRect:(NSRect)frameRect {
-  if (shell_->has_frame())
+  if (shell_ && shell_->has_frame())
     return [super contentRectForFrameRect:frameRect];
   else
     return frameRect;
@@ -238,7 +270,7 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
     //
     // If there's no frame, put the window wherever the developer
     // wanted it to go
-    if (shell_->has_frame()) {
+    if (shell_ && shell_->has_frame()) {
       result.size = frameRect.size;
     } else {
       result = frameRect;
@@ -285,7 +317,20 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (NSString*)accessibilityTitle {
-  return base::SysUTF8ToNSString(shell_->GetTitle());
+  return base::SysUTF8ToNSString(shell_ ? shell_->GetTitle() : "");
+}
+
+- (NSString*)accessibilityDocument {
+  // Prefer representedFilename set via Electron's setRepresentedFilename API.
+  // This works around a Chromium change (https://crrev.com/c/6187085) where
+  // NativeWidgetMacNSWindow's accessibilityDocument override doesn't fall back
+  // to NSWindow's default behavior of returning the representedFilename.
+  NSString* representedFilename = [self representedFilename];
+  if (representedFilename.length > 0) {
+    return [[NSURL fileURLWithPath:representedFilename] absoluteString];
+  }
+  // Fall back to Chromium's implementation for web content URLs.
+  return [super accessibilityDocument];
 }
 
 - (BOOL)canBecomeMainWindow {
@@ -305,27 +350,18 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
   // support closing a window without title we need to manually do menu item
   // validation. This code path is used by the "roundedCorners" option.
   if ([item action] == @selector(performClose:))
-    return shell_->IsClosable();
+    return shell_ && shell_->IsClosable();
   return [super validateUserInterfaceItem:item];
 }
 
-// By overriding this built-in method the corners of the vibrant view (if set)
-// will be smooth.
-- (NSImage*)_cornerMask {
-  if (self.vibrantView != nil) {
-    return [self cornerMask];
-  } else {
-    return [super _cornerMask];
-  }
-}
-
 - (void)disableHeadlessMode {
-  if (shell_) {
+  if (shell_ && self.isHeadless) {
     // We initialize the window in headless mode to allow painting before it is
     // shown, but we don't want the headless behavior of allowing the window to
     // be placed unconstrained.
     self.isHeadless = false;
-    shell_->widget()->DisableHeadlessMode();
+    if (shell_->widget())
+      shell_->widget()->DisableHeadlessMode();
   }
 }
 
@@ -375,7 +411,7 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (BOOL)toggleFullScreenMode:(id)sender {
-  if (!shell_->has_frame() && !shell_->HasStyleMask(NSWindowStyleMaskTitled))
+  if (!shell_)
     return NO;
 
   bool is_simple_fs = shell_->IsSimpleFullScreen();
@@ -411,11 +447,13 @@ void SwizzleSwipeWithEvent(NSView* view, SEL swiz_selector) {
 }
 
 - (void)performMiniaturize:(id)sender {
-  if (shell_->title_bar_style() ==
-      electron::NativeWindowMac::TitleBarStyle::kCustomButtonsOnHover)
+  if (shell_ &&
+      shell_->title_bar_style() ==
+          electron::NativeWindowMac::TitleBarStyle::kCustomButtonsOnHover) {
     [self miniaturize:self];
-  else
+  } else {
     [super performMiniaturize:sender];
+  }
 }
 
 @end

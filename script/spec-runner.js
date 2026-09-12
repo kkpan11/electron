@@ -2,26 +2,31 @@
 
 const { ElectronVersions, Installer } = require('@electron/fiddle-core');
 
-const chalk = require('chalk');
+const { DOMParser } = require('@xmldom/xmldom');
 const { hashElement } = require('folder-hash');
 const minimist = require('minimist');
 
 const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { styleText } = require('node:util');
 
 const unknownFlags = [];
 
-const pass = chalk.green('✓');
-const fail = chalk.red('✗');
+const pass = styleText('green', '✓');
+const fail = styleText('red', '✗');
+const warn = styleText('yellow', '⚠');
 
 const FAILURE_STATUS_KEY = 'Electron_Spec_Runner_Failures';
 
 const args = minimist(process.argv, {
+  boolean: ['skipYarnInstall'],
   string: ['runners', 'target', 'electronVersion'],
-  unknown: arg => unknownFlags.push(arg)
+  number: ['enableRerun'],
+  unknown: (arg) => unknownFlags.push(arg)
 });
 
 const unknownArgs = [];
@@ -34,14 +39,11 @@ for (const flag of unknownFlags) {
 }
 
 const utils = require('./lib/utils');
-const { YARN_VERSION } = require('./yarn');
+const { YARN_SCRIPT_PATH } = require('./yarn');
 
 const BASE = path.resolve(__dirname, '../..');
-const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
-const runners = new Map([
-  ['main', { description: 'Main process specs', run: runMainProcessElectronTests }]
-]);
+const runners = new Map([['main', { description: 'Main process specs', run: runMainProcessElectronTests }]]);
 
 const specHashPath = path.resolve(__dirname, '../spec/.hash');
 
@@ -56,8 +58,8 @@ if (args.electronVersion) {
 
 let runnersToRun = null;
 if (args.runners !== undefined) {
-  runnersToRun = args.runners.split(',').filter(value => value);
-  if (!runnersToRun.every(r => [...runners.keys()].includes(r))) {
+  runnersToRun = args.runners.split(',').filter((value) => value);
+  if (!runnersToRun.every((r) => [...runners.keys()].includes(r))) {
     console.log(`${fail} ${runnersToRun} must be a subset of [${[...runners.keys()].join(' | ')}]`);
     process.exit(1);
   }
@@ -66,7 +68,7 @@ if (args.runners !== undefined) {
   console.log(`Triggering runners: ${[...runners.keys()].join(', ')}`);
 }
 
-async function main () {
+async function main() {
   if (args.electronVersion) {
     const versions = await ElectronVersions.create();
     if (args.electronVersion === 'latest') {
@@ -86,17 +88,26 @@ async function main () {
     }
 
     const versionString = `v${args.electronVersion}`;
-    console.log(`Running against Electron ${versionString.green}`);
+    console.log(`Running against Electron ${styleText('green', versionString)}`);
   }
 
   const [lastSpecHash, lastSpecInstallHash] = loadLastSpecHash();
   const [currentSpecHash, currentSpecInstallHash] = await getSpecHash();
-  const somethingChanged = (currentSpecHash !== lastSpecHash) ||
-      (lastSpecInstallHash !== currentSpecInstallHash);
+  const somethingChanged = currentSpecHash !== lastSpecHash || lastSpecInstallHash !== currentSpecInstallHash;
 
-  if (somethingChanged) {
+  if (somethingChanged && !args.skipYarnInstall) {
     await installSpecModules(path.resolve(__dirname, '..', 'spec'));
     await getSpecHash().then(saveSpecHash);
+  } else if (somethingChanged) {
+    // Without the spec install the native addon fixtures stay as the root
+    // install built them, against the system Node.js headers, so the ones
+    // that need Electron's headers (see installSpecModules) cannot be loaded.
+    // CI passes --skipYarnInstall on linux-arm; gate their specs there rather
+    // than fail with an ABI error.
+    console.log(
+      `${warn} --skipYarnInstall leaves the native addon fixtures needing Electron's headers unbuilt; their specs will be skipped`
+    );
+    process.env.ELECTRON_SKIP_ELECTRON_HEADER_ADDON_SPECS = '1';
   }
 
   if (!fs.existsSync(path.resolve(__dirname, '../electron.d.ts'))) {
@@ -104,10 +115,17 @@ async function main () {
     generateTypeDefinitions();
   }
 
+  // Provision a silent virtual printer before launching Electron so the
+  // webContents.print() specs can run against a real device. Must happen here
+  // (before the test process starts) because macOS validates deviceName against
+  // a per-process PrintCore snapshot captured at startup.
+  const teardownPrinter = await setupVirtualPrinter();
+  process.on('exit', teardownPrinter);
+
   await runElectronTests();
 }
 
-function generateTypeDefinitions () {
+function generateTypeDefinitions() {
   const { status } = childProcess.spawnSync('npm', ['run', 'create-typescript-definitions'], {
     cwd: path.resolve(__dirname, '..'),
     stdio: 'inherit',
@@ -118,17 +136,194 @@ function generateTypeDefinitions () {
   }
 }
 
-function loadLastSpecHash () {
-  return fs.existsSync(specHashPath)
-    ? fs.readFileSync(specHashPath, 'utf8').split('\n')
-    : [null, null];
+function loadLastSpecHash() {
+  return fs.existsSync(specHashPath) ? fs.readFileSync(specHashPath, 'utf8').split('\n') : [null, null];
 }
 
-function saveSpecHash ([newSpecHash, newSpecInstallHash]) {
+function saveSpecHash([newSpecHash, newSpecInstallHash]) {
   fs.writeFileSync(specHashPath, `${newSpecHash}\n${newSpecInstallHash}`);
 }
 
-async function runElectronTests () {
+// Runs a command and resolves with its exit code and captured output. Never
+// rejects — spawn errors resolve with code -1.
+function spawnCapture(cmd, cmdArgs) {
+  return new Promise((resolve) => {
+    const child = childProcess.spawn(cmd, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => {
+      stdout += d;
+    });
+    child.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    child.on('error', () => resolve({ code: -1, stdout, stderr }));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForPort(port, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const listening = await new Promise((resolve) => {
+      const sock = net.connect({ host: '127.0.0.1', port }, () => {
+        sock.destroy();
+        resolve(true);
+      });
+      sock.on('error', () => resolve(false));
+      sock.setTimeout(500, () => {
+        sock.destroy();
+        resolve(false);
+      });
+    });
+    if (listening) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+function locateBinary(bin) {
+  const viaPath = (
+    childProcess.spawnSync('/bin/sh', ['-c', `command -v ${bin} 2>/dev/null`], { encoding: 'utf8' }).stdout || ''
+  ).trim();
+  if (viaPath) return viaPath;
+  for (const dir of ['/usr/sbin', '/usr/bin', '/usr/local/sbin', '/usr/local/bin']) {
+    const candidate = path.join(dir, bin);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
+// Provisions a silent virtual printer used by the webContents.print() specs
+// "Microsoft Print To PDF" on a file port on Windows, an ippeveprinter-backed
+// driverless CUPS queue on Linux/macOS. Exposes it to the test process via
+// ELECTRON_TEST_PRINTER_NAME and returns a synchronous teardown function (safe
+// to register on 'exit'). Best-effort: on any failure the spec self-skips, so
+// this never blocks the test run.
+async function setupVirtualPrinter() {
+  const noop = () => {};
+
+  // Respect a printer provisioned by the environment.
+  if (process.env.ELECTRON_TEST_PRINTER_NAME) {
+    return noop;
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      const printerName = 'ElectronTestPDF';
+      const portFile = path.join(os.tmpdir(), `electron-print-${Date.now()}.pdf`);
+      const ps = (script) => spawnCapture('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+      if ((await ps(`Add-PrinterPort -Name '${portFile}' -ErrorAction Stop`)).code !== 0) return noop;
+      const addPrinter = await ps(
+        `Add-Printer -Name '${printerName}' -DriverName 'Microsoft Print To PDF' -PortName '${portFile}' -ErrorAction Stop`
+      );
+      if (addPrinter.code !== 0) {
+        await ps(`Remove-PrinterPort -Name '${portFile}' -ErrorAction SilentlyContinue`);
+        return noop;
+      }
+      process.env.ELECTRON_TEST_PRINTER_NAME = printerName;
+      console.log(`${pass} Provisioned virtual printer: ${printerName}`);
+      return () => {
+        childProcess.spawnSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `Remove-Printer -Name '${printerName}' -ErrorAction SilentlyContinue`
+          ],
+          { stdio: 'ignore' }
+        );
+        childProcess.spawnSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `Remove-PrinterPort -Name '${portFile}' -ErrorAction SilentlyContinue`
+          ],
+          { stdio: 'ignore' }
+        );
+        fs.rmSync(portFile, { force: true });
+      };
+    }
+
+    // Linux / macOS: an IPP Everywhere virtual printer registered with CUPS.
+    const ippeve = locateBinary('ippeveprinter');
+    const lpadmin = locateBinary('lpadmin');
+    if (!ippeve || !lpadmin) {
+      console.log('Skipping virtual printer setup: ippeveprinter/lpadmin unavailable.');
+      return noop;
+    }
+
+    const printerName = 'electron-ipp-test';
+    // Remove any queue left behind by a previous interrupted run.
+    await spawnCapture(lpadmin, ['-x', printerName]);
+
+    const port = await getFreePort();
+    const spoolDir = fs.mkdtempSync(path.join(os.tmpdir(), 'electron-ippeve-'));
+    const ippServer = childProcess.spawn(
+      ippeve,
+      ['-f', 'application/pdf', '-p', String(port), '-d', spoolDir, '-k', 'Electron Test Printer'],
+      { stdio: 'ignore' }
+    );
+    let serverExited = false;
+    ippServer.on('exit', () => {
+      serverExited = true;
+    });
+    // Don't let the long-running ippeveprinter keep the runner's event loop
+    // alive; otherwise the process hangs on exit instead of running teardown.
+    ippServer.unref();
+
+    const teardown = () => {
+      childProcess.spawnSync(lpadmin, ['-x', printerName], { stdio: 'ignore' });
+      if (!serverExited) ippServer.kill();
+      fs.rmSync(spoolDir, { recursive: true, force: true });
+    };
+
+    if (!(await waitForPort(port))) {
+      teardown();
+      console.log('Skipping virtual printer setup: ippeveprinter did not start.');
+      return noop;
+    }
+
+    const add = await spawnCapture(lpadmin, [
+      '-p',
+      printerName,
+      '-E',
+      '-v',
+      `ipp://localhost:${port}/ipp/print`,
+      '-m',
+      'everywhere'
+    ]);
+    if (add.code !== 0) {
+      teardown();
+      console.log(`Skipping virtual printer setup: lpadmin failed (${add.stderr.trim()}).`);
+      return noop;
+    }
+    await spawnCapture(lpadmin, ['-d', printerName]);
+
+    process.env.ELECTRON_TEST_PRINTER_NAME = printerName;
+    console.log(`${pass} Provisioned virtual printer: ${printerName}`);
+    return teardown;
+  } catch (err) {
+    console.log(`Skipping virtual printer setup: ${err}`);
+    return noop;
+  }
+}
+
+async function runElectronTests() {
   const errors = [];
 
   const testResultsDir = process.env.ELECTRON_TEST_RESULTS_DIR;
@@ -158,7 +353,7 @@ async function runElectronTests () {
   }
 }
 
-async function asyncSpawn (exe, runnerArgs) {
+async function asyncSpawn(exe, runnerArgs) {
   return new Promise((resolve, reject) => {
     let forceExitResult = 0;
     const child = childProcess.spawn(exe, runnerArgs, {
@@ -170,7 +365,7 @@ async function asyncSpawn (exe, runnerArgs) {
     child.stdout.pipe(process.stdout);
     child.stderr.pipe(process.stderr);
     if (process.env.ELECTRON_FORCE_TEST_SUITE_EXIT) {
-      child.stdout.on('data', data => {
+      child.stdout.on('data', (data) => {
         const failureRE = RegExp(`${FAILURE_STATUS_KEY}: (\\d.*)`);
         const failures = data.toString().match(failureRE);
         if (failures) {
@@ -178,7 +373,7 @@ async function asyncSpawn (exe, runnerArgs) {
         }
       });
     }
-    child.on('error', error => reject(error));
+    child.on('error', (error) => reject(error));
     child.on('close', (status, signal) => {
       let returnStatus = 0;
       if (process.env.ELECTRON_FORCE_TEST_SUITE_EXIT) {
@@ -191,7 +386,160 @@ async function asyncSpawn (exe, runnerArgs) {
   });
 }
 
-async function runTestUsingElectron (specDir, testName) {
+function parseJUnitXML(specDir) {
+  if (!fs.existsSync(process.env.MOCHA_FILE)) {
+    console.error('JUnit XML file not found:', process.env.MOCHA_FILE);
+    return [];
+  }
+
+  const xmlContent = fs.readFileSync(process.env.MOCHA_FILE, 'utf8');
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlContent, 'text/xml');
+
+  const failedTests = [];
+  // find failed tests by looking for all testsuite nodes with failure > 0
+  const testSuites = xmlDoc.getElementsByTagName('testsuite');
+  for (let i = 0; i < testSuites.length; i++) {
+    const testSuite = testSuites[i];
+    const failures = testSuite.getAttribute('failures');
+    if (failures > 0) {
+      const testcases = testSuite.getElementsByTagName('testcase');
+
+      for (let i = 0; i < testcases.length; i++) {
+        const testcase = testcases[i];
+        const failures = testcase.getElementsByTagName('failure');
+        const errors = testcase.getElementsByTagName('error');
+
+        if (failures.length > 0 || errors.length > 0) {
+          const testName = testcase.getAttribute('name');
+          const filePath = testSuite.getAttribute('file');
+          const fileName = filePath ? path.relative(specDir, filePath) : 'unknown file';
+          const failureInfo = {
+            name: testName,
+            file: fileName,
+            filePath
+          };
+          if (failures.length > 0) {
+            failureInfo.failure = failures[0].textContent || failures[0].nodeValue || 'No failure message';
+          }
+
+          if (errors.length > 0) {
+            failureInfo.error = errors[0].textContent || errors[0].nodeValue || 'No error message';
+          }
+
+          failedTests.push(failureInfo);
+        }
+      }
+    }
+  }
+
+  return failedTests;
+}
+
+async function rerunFailedTest(specDir, testName, testInfo) {
+  console.log('\n========================================');
+  console.log(`Rerunning failed test: ${testInfo.name} (${testInfo.file})`);
+  console.log('========================================');
+
+  let grepPattern = testInfo.name;
+
+  // Escape special regex characters in test name
+  grepPattern = grepPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const args = [];
+  if (testInfo.filePath) {
+    args.push('--files', testInfo.filePath);
+  }
+  args.push('-g', grepPattern);
+
+  const success = await runTestUsingElectron(specDir, testName, false, args);
+
+  if (success) {
+    console.log(`✅ Test passed: ${testInfo.name}`);
+    return true;
+  } else {
+    console.log(`❌ Test failed again: ${testInfo.name}`);
+    return false;
+  }
+}
+
+async function rerunFailedTests(specDir, testName) {
+  console.log('\n📋 Parsing JUnit XML for failed tests...');
+  const failedTests = parseJUnitXML(specDir);
+
+  if (failedTests.length === 0) {
+    console.log('No failed tests could be found.');
+    process.exit(1);
+    return;
+  }
+
+  // Save off the original junit xml file
+  if (fs.existsSync(process.env.MOCHA_FILE)) {
+    fs.copyFileSync(process.env.MOCHA_FILE, `${process.env.MOCHA_FILE}.save`);
+  }
+
+  console.log(`\n📊 Found ${failedTests.length} failed test(s):`);
+  failedTests.forEach((test, index) => {
+    console.log(`  ${index + 1}. ${test.name} (${test.file})`);
+  });
+
+  // Step 3: Rerun each failed test individually
+  console.log('\n🔄 Rerunning failed tests individually...\n');
+
+  const results = {
+    total: failedTests.length,
+    passed: 0,
+    failed: 0
+  };
+
+  let index = 0;
+  for (const testInfo of failedTests) {
+    let runCount = 0;
+    let success = false;
+    let retryTest = false;
+    while (!success && runCount < args.enableRerun) {
+      success = await rerunFailedTest(specDir, testName, testInfo);
+      if (success) {
+        results.passed++;
+      } else {
+        if (runCount === args.enableRerun - 1) {
+          results.failed++;
+        } else {
+          retryTest = true;
+          console.log(`Retrying test (${runCount + 1}/${args.enableRerun})...`);
+        }
+      }
+
+      // Add a small delay between tests
+      if (retryTest || index < failedTests.length - 1) {
+        console.log('\nWaiting 2 seconds before next test...');
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+      runCount++;
+    }
+    index++;
+  }
+
+  // Step 4: Summary
+  console.log('\n📈 Summary:');
+  console.log(`Total failed tests: ${results.total}`);
+  console.log(`Passed on rerun: ${results.passed}`);
+  console.log(`Still failing: ${results.failed}`);
+
+  // Restore the original junit xml file
+  if (fs.existsSync(`${process.env.MOCHA_FILE}.save`)) {
+    fs.renameSync(`${process.env.MOCHA_FILE}.save`, process.env.MOCHA_FILE);
+  }
+
+  if (results.failed === 0) {
+    console.log('🎉 All previously failed tests now pass!');
+  } else {
+    console.log(`⚠️  ${results.failed} test(s) are still failing`);
+    process.exit(1);
+  }
+}
+
+async function runTestUsingElectron(specDir, testName, shouldRerun, additionalArgs = []) {
   let exe;
   if (args.electronVersion) {
     const installer = new Installer();
@@ -199,11 +547,18 @@ async function runTestUsingElectron (specDir, testName) {
   } else {
     exe = path.resolve(BASE, utils.getElectronExec());
   }
-  const runnerArgs = [`electron/${specDir}`, ...unknownArgs.slice(2)];
+  let argsToPass = unknownArgs.slice(2);
+  if (additionalArgs.includes('--files')) {
+    argsToPass = argsToPass.filter(
+      (arg) => arg.toString().indexOf('--files') === -1 && arg.toString().indexOf('spec/') === -1
+    );
+  }
+  const runnerArgs = [`electron/${specDir}`, ...argsToPass, ...additionalArgs];
   if (process.platform === 'linux') {
     runnerArgs.unshift(path.resolve(__dirname, 'dbus_mock.py'), exe);
     exe = 'python3';
   }
+  console.log(`Running: ${exe} ${runnerArgs.join(' ')}`);
   const { status, signal } = await asyncSpawn(exe, runnerArgs);
   if (status !== 0) {
     if (status) {
@@ -212,16 +567,25 @@ async function runTestUsingElectron (specDir, testName) {
     } else {
       console.log(`${fail} Electron tests failed with kill signal ${signal}.`);
     }
-    process.exit(1);
+    if (shouldRerun) {
+      await rerunFailedTests(specDir, testName);
+    } else {
+      process.exit(1);
+    }
   }
   console.log(`${pass} Electron ${testName} process tests passed.`);
+  return true;
 }
 
-async function runMainProcessElectronTests () {
-  await runTestUsingElectron('spec', 'main');
+async function runMainProcessElectronTests() {
+  let shouldRerun = false;
+  if (args.enableRerun && args.enableRerun > 0) {
+    shouldRerun = true;
+  }
+  await runTestUsingElectron('spec', 'main', shouldRerun);
 }
 
-async function installSpecModules (dir) {
+async function installSpecModules(dir) {
   const env = {
     npm_config_msvs_version: '2022',
     ...process.env,
@@ -250,24 +614,149 @@ async function installSpecModules (dir) {
   if (fs.existsSync(path.resolve(dir, 'node_modules'))) {
     await fs.promises.rm(path.resolve(dir, 'node_modules'), { force: true, recursive: true });
   }
-  const { status } = childProcess.spawnSync(NPX_CMD, [`yarn@${YARN_VERSION}`, 'install', '--frozen-lockfile'], {
+  const yarnArgs = [YARN_SCRIPT_PATH, 'install', '--immutable'];
+  const { status } = childProcess.spawnSync(process.execPath, yarnArgs, {
     env,
     cwd: dir,
-    stdio: 'inherit',
-    shell: process.platform === 'win32'
+    stdio: 'inherit'
   });
   if (status !== 0 && !process.env.IGNORE_YARN_INSTALL_ERROR) {
     console.log(`${fail} Failed to yarn install in '${dir}'`);
     process.exit(1);
   }
+
+  // The native addon fixtures are workspaces, so yarn only runs their build
+  // scripts once per install state and keeps whatever the root `yarn install`
+  // built them against (the system Node.js headers in CI). N-API addons are
+  // ABI-stable, so that is fine for them, but addons using Node's C++ module
+  // API embed NODE_MODULE_VERSION and fail to load in Electron unless they are
+  // compiled against the headers configured above. Such fixtures opt in with
+  // "electron:requiresElectronHeaders": true in their package.json and get
+  // rebuilt here.
+  const nodeGyp = path.resolve(__dirname, '..', 'node_modules', 'node-gyp', 'bin', 'node-gyp.js');
+  const nativeAddonsDir = path.resolve(dir, 'fixtures', 'native-addon');
+  const toolchainEnv = getNativeAddonToolchainEnv();
+  const rebuildEnv = { ...env, ...toolchainEnv };
+  // CI pins NPM_CONFIG_MSVS_VERSION=2022 for the spec install, but the Windows
+  // test runners only ship a newer Visual Studio; let node-gyp detect the
+  // installed one, as the root install that built the fixtures did.
+  for (const key of Object.keys(rebuildEnv)) {
+    if (key.toLowerCase() === 'npm_config_msvs_version') {
+      delete rebuildEnv[key];
+    }
+  }
+  for (const addon of fs.readdirSync(nativeAddonsDir)) {
+    const addonDir = path.join(nativeAddonsDir, addon);
+    const packageJsonPath = path.join(addonDir, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) {
+      continue;
+    }
+    const addonPackage = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+    if (!addonPackage['electron:requiresElectronHeaders']) {
+      continue;
+    }
+    if (toolchainEnv === null) {
+      // Not silent: the specs covering these fixtures are gated on this
+      // variable and report as skipped, see spec/node-spec.ts.
+      console.log(
+        `${warn} No compiler on this host can build Electron's headers, not rebuilding native addon '${addon}'; its specs will be skipped`
+      );
+      process.env.ELECTRON_SKIP_ELECTRON_HEADER_ADDON_SPECS = '1';
+      continue;
+    }
+    console.log(`Rebuilding native addon '${addon}' against Electron's node headers`);
+    const { status: rebuildStatus } = childProcess.spawnSync(process.execPath, [nodeGyp, 'rebuild'], {
+      env: rebuildEnv,
+      cwd: addonDir,
+      stdio: 'inherit'
+    });
+    if (rebuildStatus !== 0) {
+      console.log(`${fail} Failed to rebuild native addon '${addon}' in '${addonDir}'`);
+      process.exit(1);
+    }
+  }
 }
 
-function getSpecHash () {
+// Electron's V8 headers do not compile with GCC <= 12 (attribute ordering on
+// deprecated classes, see https://github.com/electron/electron/issues/53284),
+// which is what the Linux CI test image ships. When the Chromium toolchain
+// from the source checkout is available (CI restores it into the test job's
+// src_artifacts) build the addons with clang and Electron's libc++, mirroring
+// script/nan-spec-runner.js. Without it fall back to the system compiler.
+//
+// Returns null when the Chromium toolchain is present but cannot run on this
+// host: the linux-arm64 test job runs on an arm64 host but restores the x64
+// clang of the (cross-compiling) build job, and the system compiler there is
+// the same GCC that rejects the headers, so nothing on that host can build
+// the fixtures.
+function getNativeAddonToolchainEnv() {
+  if (args.electronVersion || process.platform !== 'linux') {
+    return {};
+  }
+  const outDir = utils.getOutDir();
+  const clangDir = path.resolve(BASE, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+  const libcxxConfigDir = path.resolve(BASE, 'buildtools', 'third_party', 'libc++');
+  const libcxxIncludeDir = path.resolve(BASE, 'third_party', 'libc++', 'src', 'include');
+  const libcxxabiIncludeDir = path.resolve(BASE, 'third_party', 'libc++abi', 'src', 'include');
+  const libcxxLibDir = path.resolve(BASE, 'out', outDir, 'obj', 'buildtools', 'third_party', 'libc++');
+  const libcxxabiLibDir = path.resolve(BASE, 'out', outDir, 'obj', 'buildtools', 'third_party', 'libc++abi');
+  const required = [
+    path.join(clangDir, 'clang++'),
+    libcxxConfigDir,
+    libcxxIncludeDir,
+    libcxxabiIncludeDir,
+    libcxxLibDir
+  ];
+  if (!required.every((p) => fs.existsSync(p))) {
+    console.log('Chromium clang/libc++ not found, building native addons with the system compiler');
+    return {};
+  }
+  const { error: clangError, status: clangStatus } = childProcess.spawnSync(
+    path.join(clangDir, 'clang++'),
+    ['--version'],
+    { stdio: 'ignore' }
+  );
+  if (clangError || clangStatus !== 0) {
+    console.log(
+      `${warn} Chromium clang cannot run on this ${process.arch} host (${clangError ? clangError.code : `exit code ${clangStatus}`})`
+    );
+    return null;
+  }
+  const ldflags = ['-stdlib=libc++', '-fuse-ld=lld', `-L"${libcxxLibDir}"`];
+  // Sanitizer builds compile libc++abi into the electron executable and export
+  // it from there (export_libcxxabi_from_executables in Chromium's
+  // build/config/c++/c++.gni) instead of producing a static library, so link
+  // against it only when it exists; otherwise the symbols resolve from the
+  // executable when the addon is loaded.
+  if (fs.existsSync(path.join(libcxxabiLibDir, 'libc++abi.a'))) {
+    ldflags.push(`-L"${libcxxabiLibDir}"`, '-lc++abi');
+  }
+  return {
+    CC: path.join(clangDir, 'clang'),
+    CXX: path.join(clangDir, 'clang++'),
+    LD: path.join(clangDir, 'lld'),
+    CFLAGS: '-Wno-trigraphs -fPIC',
+    CXXFLAGS: [
+      '-Wno-trigraphs',
+      '-nostdinc++',
+      `-isystem "${libcxxConfigDir}"`,
+      `-isystem "${libcxxIncludeDir}"`,
+      `-isystem "${libcxxabiIncludeDir}"`,
+      '-fvisibility-inlines-hidden',
+      '-fPIC',
+      '-D_LIBCPP_ABI_NAMESPACE=Cr',
+      '-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE'
+    ].join(' '),
+    LDFLAGS: ldflags.join(' ')
+  };
+}
+
+function getSpecHash() {
   return Promise.all([
     (async () => {
       const hasher = crypto.createHash('SHA256');
+      hasher.update(fs.readFileSync(path.resolve(__dirname, '../yarn.lock')));
       hasher.update(fs.readFileSync(path.resolve(__dirname, '../spec/package.json')));
-      hasher.update(fs.readFileSync(path.resolve(__dirname, '../spec/yarn.lock')));
       hasher.update(fs.readFileSync(path.resolve(__dirname, '../script/spec-runner.js')));
       return hasher.digest('hex');
     })(),

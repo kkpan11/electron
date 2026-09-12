@@ -11,13 +11,17 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
+#include "base/notimplemented.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/time/time.h"
 #include "content/public/browser/browser_context.h"
 #include "extensions/browser/extension_file_task_runner.h"
+#include "extensions/browser/extension_pref_names.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/pref_names.h"
@@ -25,6 +29,7 @@
 #include "extensions/common/error_utils.h"
 #include "extensions/common/file_util.h"
 #include "extensions/common/manifest_constants.h"
+#include "extensions/common/manifest_handlers/background_info.h"
 
 namespace extensions {
 
@@ -51,14 +56,14 @@ std::pair<scoped_refptr<const Extension>, std::string> LoadUnpacked(
     base::DeletePathRecursively(metadata_dir);
   }
 
-  std::string load_error;
+  std::u16string load_error;
   scoped_refptr<Extension> extension = file_util::LoadExtension(
       extension_dir, extensions::mojom::ManifestLocation::kCommandLine,
       load_flags, &load_error);
   if (!extension.get()) {
     std::string err = "Loading extension at " +
                       base::UTF16ToUTF8(extension_dir.LossyDisplayName()) +
-                      " failed with: " + load_error;
+                      " failed with: " + base::UTF16ToUTF8(load_error);
     return std::make_pair(nullptr, err);
   }
 
@@ -141,15 +146,28 @@ void ElectronExtensionLoader::FinishExtensionLoad(
     std::pair<scoped_refptr<const Extension>, std::string> result) {
   scoped_refptr<const Extension> extension = result.first;
   if (extension) {
+    ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(browser_context_);
+
+    if (BackgroundInfo::IsServiceWorkerBased(extension.get())) {
+      // Tell Chromium that it needs to start the extension's service worker.
+      // Chromium usually does this only when an extension is first installed
+      // because Chrome will restart the service worker when the browser
+      // relaunches. In Electron, we make a fresh install on every app start,
+      // so we need to run the fresh install logic again.
+      extension_prefs->UpdateExtensionPref(
+          extension.get()->id(), extensions::kPrefHasStartedServiceWorker,
+          base::Value(false));
+    }
+
     extension_registrar_->AddExtension(extension);
 
-    // Write extension install time to ExtensionPrefs. This is required by
-    // WebRequestAPI which calls extensions::ExtensionPrefs::GetInstallTime.
+    // Write extension install time to ExtensionPrefs.
+    // This is required by extensions::WebRequestAPI
+    // which calls extensions::ExtensionPrefs::GetInstallTime.
     //
     // Implementation for writing the pref was based on
     // PreferenceAPIBase::SetExtensionControlledPref.
     {
-      ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(browser_context_);
       ExtensionPrefs::ScopedDictionaryUpdate update(
           extension_prefs, extension.get()->id(),
           extensions::pref_names::kPrefPreferences);

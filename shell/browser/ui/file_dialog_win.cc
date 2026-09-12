@@ -6,21 +6,17 @@
 
 #include <windows.h>  // windows.h must be included first
 
-#include "base/win/shlwapi.h"  // NOLINT(build/include_order)
-
-// atlbase.h for CComPtr
-#include <atlbase.h>  // NOLINT(build/include_order)
-
-#include <shlobj.h>    // NOLINT(build/include_order)
-#include <shobjidl.h>  // NOLINT(build/include_order)
+#include <shlobj.h>
+#include <shobjidl.h>
 
 #include "base/files/file_util.h"
-#include "base/i18n/case_conversion.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/win/registry.h"
+#include "base/win/atl.h"
+#include "base/win/shlwapi.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/win/dialog_thread.h"
+#include "shell/common/electron_paths.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
@@ -44,8 +40,7 @@ void ConvertFilters(const Filters& filters,
                     std::vector<std::wstring>* buffer,
                     std::vector<COMDLG_FILTERSPEC>* filterspec) {
   if (filters.empty()) {
-    COMDLG_FILTERSPEC spec = {L"All Files (*.*)", L"*.*"};
-    filterspec->push_back(spec);
+    filterspec->push_back({L"All Files (*.*)", L"*.*"});
     return;
   }
 
@@ -55,11 +50,16 @@ void ConvertFilters(const Filters& filters,
     buffer->push_back(base::UTF8ToWide(filter.first));
     spec.pszName = buffer->back().c_str();
 
-    std::vector<std::string> extensions(filter.second);
-    for (std::string& extension : extensions)
-      extension.insert(0, "*.");
-    buffer->push_back(base::UTF8ToWide(base::JoinString(extensions, ";")));
-    spec.pszSpec = buffer->back().c_str();
+    if (filter.second.empty()) {
+      buffer->push_back(L"*.*");
+      spec.pszSpec = buffer->back().c_str();
+    } else {
+      std::vector<std::string> extensions(filter.second);
+      for (std::string& extension : extensions)
+        extension.insert(0, "*.");
+      buffer->push_back(base::UTF8ToWide(base::JoinString(extensions, ";")));
+      spec.pszSpec = buffer->back().c_str();
+    }
 
     filterspec->push_back(spec);
   }
@@ -88,22 +88,24 @@ static void SetDefaultFolder(IFileDialog* dialog,
     dialog->SetFolder(folder_item);
 }
 
-static HRESULT ShowFileDialog(IFileDialog* dialog,
-                              const DialogSettings& settings) {
-  HWND parent_window =
-      settings.parent_window
-          ? static_cast<electron::NativeWindowViews*>(settings.parent_window)
-                ->GetAcceleratedWidget()
-          : nullptr;
-
-  return dialog->Show(parent_window);
+// settings.parent_window is a NativeWindow that lives on the UI thread, so
+// resolve its HWND there; the dialog itself may run on dialog_thread.
+static HWND GetParentWindowHandle(const DialogSettings& settings) {
+  return settings.parent_window
+             ? static_cast<electron::NativeWindowViews*>(settings.parent_window)
+                   ->GetAcceleratedWidget()
+             : nullptr;
 }
 
 static void ApplySettings(IFileDialog* dialog, const DialogSettings& settings) {
   std::wstring file_part;
 
-  if (!IsDirectory(settings.default_path))
-    file_part = settings.default_path.BaseName().value();
+  base::FilePath default_path = settings.default_path.empty()
+                                    ? electron::GetDefaultPath()
+                                    : settings.default_path;
+
+  if (!IsDirectory(default_path))
+    file_part = default_path.BaseName().value();
 
   dialog->SetFileName(file_part.c_str());
 
@@ -145,15 +147,16 @@ static void ApplySettings(IFileDialog* dialog, const DialogSettings& settings) {
     }
   }
 
-  if (settings.default_path.IsAbsolute()) {
-    SetDefaultFolder(dialog, settings.default_path);
+  if (default_path.IsAbsolute()) {
+    SetDefaultFolder(dialog, default_path);
   }
 }
 
 }  // namespace
 
-bool ShowOpenDialogSync(const DialogSettings& settings,
-                        std::vector<base::FilePath>* paths) {
+static bool ShowOpenDialogSyncWithParent(const DialogSettings& settings,
+                                         HWND parent_window,
+                                         std::vector<base::FilePath>* paths) {
   ATL::CComPtr<IFileOpenDialog> file_open_dialog;
   HRESULT hr = file_open_dialog.CoCreateInstance(CLSID_FileOpenDialog);
 
@@ -174,7 +177,7 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
   file_open_dialog->SetOptions(options);
 
   ApplySettings(file_open_dialog, settings);
-  hr = ShowFileDialog(file_open_dialog, settings);
+  hr = file_open_dialog->Show(parent_window);
   if (FAILED(hr))
     return false;
 
@@ -183,7 +186,6 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
   if (FAILED(hr))
     return false;
 
-  ATL::CComPtr<IShellItem> item;
   DWORD count = 0;
   hr = items->GetCount(&count);
   if (FAILED(hr))
@@ -191,6 +193,7 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
 
   paths->reserve(count);
   for (DWORD i = 0; i < count; ++i) {
+    ATL::CComPtr<IShellItem> item;
     hr = items->GetItemAt(i, &item);
     if (FAILED(hr))
       return false;
@@ -205,6 +208,12 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
   return true;
 }
 
+bool ShowOpenDialogSync(const DialogSettings& settings,
+                        std::vector<base::FilePath>* paths) {
+  return ShowOpenDialogSyncWithParent(settings, GetParentWindowHandle(settings),
+                                      paths);
+}
+
 void ShowOpenDialog(const DialogSettings& settings,
                     gin_helper::Promise<gin_helper::Dictionary> promise) {
   auto done = [](gin_helper::Promise<gin_helper::Dictionary> promise,
@@ -215,15 +224,18 @@ void ShowOpenDialog(const DialogSettings& settings,
     dict.Set("filePaths", result);
     promise.Resolve(dict);
   };
-  dialog_thread::Run(base::BindOnce(ShowOpenDialogSync, settings),
+  dialog_thread::Run(base::BindOnce(ShowOpenDialogSyncWithParent, settings,
+                                    GetParentWindowHandle(settings)),
                      base::BindOnce(done, std::move(promise)));
 }
 
-bool ShowSaveDialogSync(const DialogSettings& settings, base::FilePath* path) {
+static std::optional<base::FilePath> ShowSaveDialogSyncWithParent(
+    const DialogSettings& settings,
+    HWND parent_window) {
   ATL::CComPtr<IFileSaveDialog> file_save_dialog;
   HRESULT hr = file_save_dialog.CoCreateInstance(CLSID_FileSaveDialog);
   if (FAILED(hr))
-    return false;
+    return {};
 
   DWORD options = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT;
   if (settings.properties & SAVE_DIALOG_SHOW_HIDDEN_FILES)
@@ -233,38 +245,44 @@ bool ShowSaveDialogSync(const DialogSettings& settings, base::FilePath* path) {
 
   file_save_dialog->SetOptions(options);
   ApplySettings(file_save_dialog, settings);
-  hr = ShowFileDialog(file_save_dialog, settings);
+  hr = file_save_dialog->Show(parent_window);
 
   if (FAILED(hr))
-    return false;
+    return {};
 
   CComPtr<IShellItem> pItem;
   hr = file_save_dialog->GetResult(&pItem);
   if (FAILED(hr))
-    return false;
+    return {};
 
   PWSTR result_path = nullptr;
   hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &result_path);
   if (!SUCCEEDED(hr))
-    return false;
+    return {};
 
-  *path = base::FilePath(result_path);
+  auto path = base::FilePath{result_path};
   CoTaskMemFree(result_path);
+  return path;
+}
 
-  return true;
+std::optional<base::FilePath> ShowSaveDialogSync(
+    const DialogSettings& settings) {
+  return ShowSaveDialogSyncWithParent(settings,
+                                      GetParentWindowHandle(settings));
 }
 
 void ShowSaveDialog(const DialogSettings& settings,
                     gin_helper::Promise<gin_helper::Dictionary> promise) {
   auto done = [](gin_helper::Promise<gin_helper::Dictionary> promise,
-                 bool success, base::FilePath result) {
+                 std::optional<base::FilePath> result) {
     v8::HandleScope handle_scope(promise.isolate());
     auto dict = gin::Dictionary::CreateEmpty(promise.isolate());
-    dict.Set("canceled", !success);
-    dict.Set("filePath", result);
+    dict.Set("canceled", !result.has_value());
+    dict.Set("filePath", result.value_or(base::FilePath{}));
     promise.Resolve(dict);
   };
-  dialog_thread::Run(base::BindOnce(ShowSaveDialogSync, settings),
+  dialog_thread::Run(base::BindOnce(ShowSaveDialogSyncWithParent, settings,
+                                    GetParentWindowHandle(settings)),
                      base::BindOnce(done, std::move(promise)));
 }
 

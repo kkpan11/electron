@@ -8,25 +8,7 @@
 
 #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
 #include "ui/views/widget/native_widget_aura.h"
-
-#if BUILDFLAG(IS_LINUX)
-#include "base/environment.h"
-#include "base/nix/xdg_util.h"
-#include "ui/linux/linux_ui.h"
-#endif
-
-namespace {
-
-#if BUILDFLAG(IS_LINUX)
-bool IsDesktopEnvironmentUnity() {
-  auto env = base::Environment::Create();
-  base::nix::DesktopEnvironment desktop_env =
-      base::nix::GetDesktopEnvironment(env.get());
-  return desktop_env == base::nix::DESKTOP_ENVIRONMENT_UNITY;
-}
-#endif
-
-}  // namespace
+#include "ui/views/window/default_frame_view.h"
 
 namespace electron {
 
@@ -60,9 +42,9 @@ gfx::ImageSkia* ViewsDelegate::GetDefaultWindowIcon() const {
 }
 #endif
 
-std::unique_ptr<views::NonClientFrameView>
-ViewsDelegate::CreateDefaultNonClientFrameView(views::Widget* widget) {
-  return nullptr;
+std::unique_ptr<views::FrameView> ViewsDelegate::CreateDefaultFrameView(
+    views::Widget* widget) {
+  return std::make_unique<views::DefaultFrameView>(widget);
 }
 
 void ViewsDelegate::OnBeforeWidgetInit(
@@ -79,19 +61,6 @@ void ViewsDelegate::OnBeforeWidgetInit(
   } else {
     params->native_widget = new views::DesktopNativeWidgetAura(delegate);
   }
-}
-
-bool ViewsDelegate::WindowManagerProvidesTitleBar(bool maximized) {
-#if BUILDFLAG(IS_LINUX)
-  // On Ubuntu Unity, the system always provides a title bar for maximized
-  // windows.
-  if (!maximized)
-    return false;
-  static bool is_desktop_environment_unity = IsDesktopEnvironmentUnity();
-  return is_desktop_environment_unity;
-#else
-  return false;
-#endif
 }
 
 }  // namespace electron

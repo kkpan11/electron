@@ -7,11 +7,9 @@
 #include <string>
 #include <utility>
 
+#include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
 #include "chrome/browser/ui/color/chrome_color_provider_utils.h"
@@ -32,7 +30,7 @@ std::string PathWithoutParams(const std::string& path) {
                             url::kStandardSchemeSeparator,
                             chrome::kChromeUIDevToolsHost}))
       .Resolve(path)
-      .path()
+      .GetPath()
       .substr(1);
 }
 

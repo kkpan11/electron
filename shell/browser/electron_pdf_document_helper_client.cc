@@ -4,12 +4,12 @@
 
 #include "shell/browser/electron_pdf_document_helper_client.h"
 
-#include "chrome/browser/pdf/pdf_viewer_stream_manager.h"
 #include "chrome/common/content_restriction.h"
 #include "components/pdf/browser/pdf_frame_util.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/browser/guest_view/mime_handler_view/mime_handler_view_guest.h"
+#include "extensions/browser/mime_handler/mime_handler_stream_manager.h"
 #include "pdf/content_restriction.h"
 #include "pdf/pdf_features.h"
 #include "shell/browser/api/electron_api_web_contents.h"
@@ -18,7 +18,7 @@ ElectronPDFDocumentHelperClient::ElectronPDFDocumentHelperClient() = default;
 ElectronPDFDocumentHelperClient::~ElectronPDFDocumentHelperClient() = default;
 
 void ElectronPDFDocumentHelperClient::UpdateContentRestrictions(
-    content::RenderFrameHost* render_frame_host,
+    content::RenderFrameHost& render_frame_host,
     int content_restrictions) {
   // UpdateContentRestrictions potentially gets called twice from
   // pdf/pdf_view_web_plugin.cc. The first time it is potentially called is
@@ -26,49 +26,48 @@ void ElectronPDFDocumentHelperClient::UpdateContentRestrictions(
   // second time it is called is when loading is finished and if printing is
   // allowed there won't be a printing restriction passed, so we can use this
   // second call to notify that the pdf document is ready to print.
-  if (!(content_restrictions & chrome_pdf::kContentRestrictionPrint)) {
-    // It's a WebView - emit the event on the WebView webContents.
-    auto* guest_view = extensions::MimeHandlerViewGuest::FromRenderFrameHost(
-        render_frame_host);
-    if (guest_view) {
-      auto* gv_api_wc =
-          electron::api::WebContents::From(guest_view->embedder_web_contents());
-      if (gv_api_wc)
-        gv_api_wc->PDFReadyToPrint();
-      return;
-    }
+  if (content_restrictions & chrome_pdf::kContentRestrictionPrint) {
+    return;
+  }
 
-    auto* wc = content::WebContents::FromRenderFrameHost(render_frame_host);
-    if (wc) {
-      auto* api_wc =
-          electron::api::WebContents::From(wc->GetOuterWebContents());
-      if (api_wc)
-        api_wc->PDFReadyToPrint();
-    }
+  // If it's a WebView, emit the event on the WebView's webContents
+  auto* guest_view =
+      extensions::MimeHandlerViewGuest::FromRenderFrameHost(&render_frame_host);
+  auto* wc =
+      guest_view
+          ? guest_view->embedder_web_contents()
+          : content::WebContents::FromRenderFrameHost(&render_frame_host);
+  if (!wc) {
+    return;
+  }
+
+  auto* api_wc = electron::api::WebContents::From(wc);
+  if (api_wc) {
+    api_wc->PDFReadyToPrint();
   }
 }
 
 void ElectronPDFDocumentHelperClient::SetPluginCanSave(
-    content::RenderFrameHost* render_frame_host,
+    content::RenderFrameHost& render_frame_host,
     bool can_save) {
   if (chrome_pdf::features::IsOopifPdfEnabled()) {
-    auto* pdf_viewer_stream_manager =
-        pdf::PdfViewerStreamManager::FromWebContents(
-            content::WebContents::FromRenderFrameHost(render_frame_host));
-    if (!pdf_viewer_stream_manager) {
+    auto* mime_handler_stream_manager =
+        extensions::mime_handler::MimeHandlerStreamManager::FromWebContents(
+            content::WebContents::FromRenderFrameHost(&render_frame_host));
+    if (!mime_handler_stream_manager) {
       return;
     }
 
     content::RenderFrameHost* embedder_host =
-        pdf_frame_util::GetEmbedderHost(render_frame_host);
+        pdf_frame_util::GetEmbedderHost(&render_frame_host);
     CHECK(embedder_host);
 
-    pdf_viewer_stream_manager->SetPluginCanSave(embedder_host, can_save);
+    mime_handler_stream_manager->SetPluginCanSave(embedder_host, can_save);
     return;
   }
 
   auto* guest_view =
-      extensions::MimeHandlerViewGuest::FromRenderFrameHost(render_frame_host);
+      extensions::MimeHandlerViewGuest::FromRenderFrameHost(&render_frame_host);
   if (guest_view) {
     guest_view->SetPluginCanSave(can_save);
   }
@@ -76,9 +75,5 @@ void ElectronPDFDocumentHelperClient::SetPluginCanSave(
 
 #if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
 void ElectronPDFDocumentHelperClient::OnSearchifyStarted(
-    content::WebContents* contents) {
-  // TODO(crbug.com/360803943): Add test.
-  // Show the promo only when ScreenAI component is available and OCR can be
-  // done.
-}
+    content::RenderFrameHost& render_frame_host) {}
 #endif

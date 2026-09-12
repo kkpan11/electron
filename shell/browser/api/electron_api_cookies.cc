@@ -13,11 +13,8 @@
 #include "base/time/time.h"
 #include "base/values.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/storage_partition.h"
 #include "gin/dictionary.h"
-#include "gin/handle.h"
 #include "gin/object_template_builder.h"
 #include "net/cookies/canonical_cookie.h"
 #include "net/cookies/cookie_change_dispatcher.h"
@@ -30,8 +27,10 @@
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace gin {
 
@@ -80,6 +79,11 @@ struct Converter<net::CookieChangeCause> {
                                    const net::CookieChangeCause& val) {
     switch (val) {
       case net::CookieChangeCause::INSERTED:
+        return gin::StringToV8(isolate, "inserted");
+      case net::CookieChangeCause::INSERTED_NO_CHANGE_OVERWRITE:
+        return gin::StringToV8(isolate, "inserted-no-change-overwrite");
+      case net::CookieChangeCause::INSERTED_NO_VALUE_CHANGE_OVERWRITE:
+        return gin::StringToV8(isolate, "inserted-no-value-change-overwrite");
       case net::CookieChangeCause::EXPLICIT:
         return gin::StringToV8(isolate, "explicit");
       case net::CookieChangeCause::OVERWRITE:
@@ -103,7 +107,7 @@ namespace electron::api {
 namespace {
 
 // Returns whether |cookie| matches |filter|.
-bool MatchesCookie(const base::Value::Dict& filter,
+bool MatchesCookie(const base::DictValue& filter,
                    const net::CanonicalCookie& cookie) {
   const std::string* str;
   if ((str = filter.FindString("name")) && *str != cookie.Name())
@@ -125,7 +129,7 @@ bool MatchesCookie(const base::Value::Dict& filter,
 }
 
 // Remove cookies from |list| not matching |filter|, and pass it to |callback|.
-void FilterCookies(base::Value::Dict filter,
+void FilterCookies(base::DictValue filter,
                    gin_helper::Promise<net::CookieList> promise,
                    const net::CookieList& cookies) {
   net::CookieList result;
@@ -137,7 +141,7 @@ void FilterCookies(base::Value::Dict filter,
 }
 
 void FilterCookieWithStatuses(
-    base::Value::Dict filter,
+    base::DictValue filter,
     gin_helper::Promise<net::CookieList> promise,
     const net::CookieAccessResultList& list,
     const net::CookieAccessResultList& excluded_list) {
@@ -231,7 +235,12 @@ const std::string InclusionStatusToString(net::CookieInclusionStatus status) {
             "The cookie contains no content or only whitespace."},
            {Reason::EXCLUDE_ANONYMOUS_CONTEXT,
             "The cookie is unpartitioned and being accessed from an anonymous "
-            "context."}});
+            "context."},
+           {Reason::EXCLUDE_INVALID_PATH,
+            "The cookie was set with an invalid Path attribute."},
+           {Reason::EXCLUDE_AMBIGUOUS_SERIALIZATION,
+            "Cookie was rejected in parsing due to having an ambiguous "
+            "serialization."}});
   static_assert(
       Reasons.size() ==
           net::CookieInclusionStatus::ExclusionReasonBitset::kValueCount,
@@ -272,9 +281,21 @@ std::string StringToCookieSameSite(const std::string* str_ptr,
   return "";
 }
 
+bool IsDeletion(net::CookieChangeCause cause) {
+  switch (cause) {
+    case net::CookieChangeCause::INSERTED:
+    case net::CookieChangeCause::INSERTED_NO_CHANGE_OVERWRITE:
+    case net::CookieChangeCause::INSERTED_NO_VALUE_CHANGE_OVERWRITE:
+      return false;
+    default:
+      return true;
+  }
+}
+
 }  // namespace
 
-gin::WrapperInfo Cookies::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo Cookies::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronCookies);
 
 Cookies::Cookies(ElectronBrowserContext* browser_context)
     : browser_context_{browser_context} {
@@ -294,7 +315,7 @@ v8::Local<v8::Promise> Cookies::Get(v8::Isolate* isolate,
   auto* storage_partition = browser_context_->GetDefaultStoragePartition();
   auto* manager = storage_partition->GetCookieManagerForBrowserProcess();
 
-  base::Value::Dict dict;
+  base::DictValue dict;
   gin::ConvertFromV8(isolate, filter.GetHandle(), &dict);
 
   std::string url;
@@ -310,7 +331,7 @@ v8::Local<v8::Promise> Cookies::Get(v8::Isolate* isolate,
     options.set_do_not_update_access_time();
 
     manager->GetCookieList(GURL(url), options,
-                           net::CookiePartitionKeyCollection::Todo(),
+                           net::CookiePartitionKeyCollection::ContainsAll(),
                            base::BindOnce(&FilterCookieWithStatuses,
                                           std::move(dict), std::move(promise)));
   }
@@ -343,7 +364,7 @@ v8::Local<v8::Promise> Cookies::Remove(v8::Isolate* isolate,
 }
 
 v8::Local<v8::Promise> Cookies::Set(v8::Isolate* isolate,
-                                    base::Value::Dict details) {
+                                    base::DictValue details) {
   gin_helper::Promise<void> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
@@ -435,16 +456,17 @@ v8::Local<v8::Promise> Cookies::FlushStore(v8::Isolate* isolate) {
 void Cookies::OnCookieChanged(const net::CookieChangeInfo& change) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
+  bool is_deletion = IsDeletion(change.cause);
   Emit("changed", gin::ConvertToV8(isolate, change.cookie),
        gin::ConvertToV8(isolate, change.cause),
-       gin::ConvertToV8(isolate,
-                        change.cause != net::CookieChangeCause::INSERTED));
+       gin::ConvertToV8(isolate, is_deletion));
 }
 
 // static
-gin::Handle<Cookies> Cookies::Create(v8::Isolate* isolate,
-                                     ElectronBrowserContext* browser_context) {
-  return gin::CreateHandle(isolate, new Cookies{browser_context});
+Cookies* Cookies::Create(v8::Isolate* isolate,
+                         ElectronBrowserContext* browser_context) {
+  return cppgc::MakeGarbageCollected<Cookies>(
+      isolate->GetCppHeap()->GetAllocationHandle(), browser_context);
 }
 
 gin::ObjectTemplateBuilder Cookies::GetObjectTemplateBuilder(
@@ -457,8 +479,12 @@ gin::ObjectTemplateBuilder Cookies::GetObjectTemplateBuilder(
       .SetMethod("flushStore", &Cookies::FlushStore);
 }
 
-const char* Cookies::GetTypeName() {
-  return "Cookies";
+const gin::WrapperInfo* Cookies::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* Cookies::GetHumanReadableName() const {
+  return "Electron / Cookies";
 }
 
 }  // namespace electron::api

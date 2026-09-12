@@ -11,6 +11,7 @@
 #include "base/i18n/rtl.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/win/windows_version.h"
+#include "chrome/browser/ui/color/chrome_color_id.h"
 #include "chrome/grit/theme_resources.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/views/win_frame_view.h"
@@ -21,6 +22,7 @@
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/scoped_canvas.h"
+#include "ui/views/accessibility/view_accessibility.h"
 
 namespace electron {
 
@@ -35,7 +37,7 @@ WinCaptionButton::WinCaptionButton(PressedCallback callback,
   SetAnimateOnStateChange(true);
   // Not focusable by default, only for accessibility.
   SetFocusBehavior(FocusBehavior::ACCESSIBLE_ONLY);
-  SetAccessibleName(accessible_name);
+  GetViewAccessibility().SetName(accessible_name);
 }
 
 WinCaptionButton::~WinCaptionButton() = default;
@@ -45,6 +47,13 @@ std::unique_ptr<WinIconPainter> WinCaptionButton::CreateIconPainter() {
     return std::make_unique<Win11IconPainter>();
   }
   return std::make_unique<WinIconPainter>();
+}
+
+SkColor WinCaptionButton::GetBaseForegroundColor() const {
+  return GetColorProvider()->GetColor(
+      frame_view_->GetShouldPaintAsActive()
+          ? kColorCaptionButtonForegroundActive
+          : kColorCaptionButtonForegroundInactive);
 }
 
 gfx::Size WinCaptionButton::CalculatePreferredSize(
@@ -59,7 +68,8 @@ void WinCaptionButton::OnPaintBackground(gfx::Canvas* canvas) {
   // Paint the background of the button (the semi-transparent rectangle that
   // appears when you hover or press the button).
 
-  const SkColor bg_color = frame_view_->window()->overlay_button_color();
+  const SkColor bg_color =
+      frame_view_->window()->overlay_button_color().value_or(SkColor());
   const SkAlpha theme_alpha = SkColorGetA(bg_color);
 
   gfx::Rect bounds = GetContentsBounds();
@@ -76,7 +86,7 @@ void WinCaptionButton::OnPaintBackground(gfx::Canvas* canvas) {
     pressed_alpha = 0x98;
   } else {
     // Match the native buttons.
-    base_color = frame_view_->GetReadableFeatureColor(bg_color);
+    base_color = GetBaseForegroundColor();
     hovered_alpha = 0x1A;
     pressed_alpha = 0x33;
 
@@ -150,7 +160,8 @@ int WinCaptionButton::GetButtonDisplayOrderIndex() const {
 }
 
 void WinCaptionButton::PaintSymbol(gfx::Canvas* canvas) {
-  SkColor symbol_color = frame_view_->window()->overlay_symbol_color();
+  SkColor symbol_color =
+      frame_view_->window()->overlay_symbol_color().value_or(SkColor());
 
   if (button_type_ == VIEW_ID_CLOSE_BUTTON &&
       hover_animation().is_animating()) {

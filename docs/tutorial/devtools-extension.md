@@ -35,15 +35,16 @@ Using the [React Developer Tools][react-devtools] as an example:
 
    ```js
    const { app, session } = require('electron')
-   const path = require('node:path')
+   
    const os = require('node:os')
-
+   const path = require('node:path')
+   
    // on macOS
    const reactDevToolsPath = path.join(
      os.homedir(),
      '/Library/Application Support/Google/Chrome/Default/Extensions/fmkadmapgofadopljbjfkapdkoienihi/4.9.0_0'
    )
-
+   
    app.whenReady().then(async () => {
      await session.defaultSession.loadExtension(reactDevToolsPath)
    })
@@ -93,7 +94,7 @@ If the extension works on Chrome but not on Electron, file a bug in Electron's
 [issue tracker][issue-tracker] and describe which part
 of the extension is not working as expected.
 
-[devtools-extension]: https://developer.chrome.com/extensions/devtools
+[devtools-extension]: https://developer.chrome.com/docs/extensions/how-to/devtools/extend-devtools
 [session]: ../api/session.md
 [react-devtools]: https://chrome.google.com/webstore/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi
 [load-extension]: ../api/extensions-api.md#extensionsloadextensionpath-options

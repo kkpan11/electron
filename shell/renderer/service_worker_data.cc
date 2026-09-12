@@ -4,9 +4,9 @@
 
 #include "electron/shell/renderer/service_worker_data.h"
 
+#include "base/notimplemented.h"
 #include "shell/common/gin_converters/blink_converter.h"
-#include "shell/common/gin_converters/value_converter.h"
-#include "shell/common/heap_snapshot.h"
+#include "shell/common/gin_converters/serialized_value_converter.h"
 #include "shell/renderer/electron_ipc_native.h"
 #include "shell/renderer/preload_realm_context.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
@@ -17,11 +17,12 @@ ServiceWorkerData::~ServiceWorkerData() = default;
 
 ServiceWorkerData::ServiceWorkerData(blink::WebServiceWorkerContextProxy* proxy,
                                      int64_t service_worker_version_id,
+                                     v8::Isolate* const isolate,
                                      const v8::Local<v8::Context>& v8_context)
-    : proxy_(proxy),
-      service_worker_version_id_(service_worker_version_id),
-      isolate_(v8_context->GetIsolate()),
-      v8_context_(v8_context->GetIsolate(), v8_context) {
+    : proxy_{proxy},
+      service_worker_version_id_{service_worker_version_id},
+      isolate_{isolate},
+      v8_context_(isolate_, v8_context) {
   proxy_->GetAssociatedInterfaceRegistry()
       .AddInterface<mojom::ElectronRenderer>(
           base::BindRepeating(&ServiceWorkerData::OnElectronRendererRequest,
@@ -36,7 +37,7 @@ void ServiceWorkerData::OnElectronRendererRequest(
 
 void ServiceWorkerData::Message(bool internal,
                                 const std::string& channel,
-                                blink::CloneableMessage arguments) {
+                                electron::SerializedValue arguments) {
   v8::Isolate* isolate = isolate_.get();
   v8::HandleScope handle_scope(isolate);
 
@@ -55,7 +56,8 @@ void ServiceWorkerData::Message(bool internal,
 
   v8::Local<v8::Value> args = gin::ConvertToV8(isolate, arguments);
 
-  ipc_native::EmitIPCEvent(preload_context, internal, channel, {}, args);
+  ipc_native::EmitIPCEvent(isolate, preload_context, internal, channel, {},
+                           args);
 }
 
 void ServiceWorkerData::ReceivePostMessage(const std::string& channel,

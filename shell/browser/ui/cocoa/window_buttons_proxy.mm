@@ -162,20 +162,26 @@
 }
 
 - (void)updateButtonsVisibility {
-  NSArray* buttons = @[
-    [window_ standardWindowButton:NSWindowCloseButton],
-    [window_ standardWindowButton:NSWindowMiniaturizeButton],
-    [window_ standardWindowButton:NSWindowZoomButton],
-  ];
   // Show buttons when mouse hovers above them.
   BOOL hidden = show_on_hover_ && !mouse_inside_;
   // Always show buttons under fullscreen.
   if ([window_ styleMask] & NSWindowStyleMaskFullScreen)
     hidden = NO;
-  for (NSView* button in buttons) {
+  for (NSWindowButton button_type :
+       {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+    NSButton* button = [window_ standardWindowButton:button_type];
+    if (!button)
+      continue;
     [button setHidden:hidden];
     [button setNeedsDisplay:YES];
   }
+
+  // On macOS 26, toggling the hidden state of the standard window buttons can
+  // cause AppKit to re-layout the title bar container and reset its frame,
+  // which loses the custom margin adjustments. Re-apply the calculated geometry
+  // after visibility changes to keep the buttons at the specified margin
+  // instead of snapping back to the default until the next manual resize.
+  [self redraw];
 }
 
 // Return the bounds of all 3 buttons.

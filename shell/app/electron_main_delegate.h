@@ -9,11 +9,9 @@
 #include <string>
 #include <string_view>
 
+#include "base/containers/span.h"
+#include "components/memory_system/memory_system.h"
 #include "content/public/app/content_main_delegate.h"
-
-namespace content {
-class Client;
-}
 
 namespace tracing {
 class TracingSamplerProfiler;
@@ -25,8 +23,7 @@ std::string LoadResourceBundle(const std::string& locale);
 
 class ElectronMainDelegate : public content::ContentMainDelegate {
  public:
-  static const char* const kNonWildcardDomainNonPortSchemes[];
-  static const size_t kNonWildcardDomainNonPortSchemesSize;
+  static base::span<const char* const> GetNonWildcardDomainNonPortSchemes();
   ElectronMainDelegate();
   ~ElectronMainDelegate() override;
 
@@ -47,6 +44,7 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
   void PreSandboxStartup() override;
   void SandboxInitialized(const std::string& process_type) override;
   std::optional<int> PreBrowserMain() override;
+  std::optional<int> PostEarlyInitialization(InvokedIn invoked_in) override;
   content::ContentClient* CreateContentClient() override;
   content::ContentBrowserClient* CreateContentBrowserClient() override;
   content::ContentGpuClient* CreateContentGpuClient() override;
@@ -57,10 +55,13 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
       content::MainFunctionParams main_function_params) override;
   bool ShouldCreateFeatureList(InvokedIn invoked_in) override;
   bool ShouldInitializeMojo(InvokedIn invoked_in) override;
+  bool ShouldLoadV8Snapshot(const std::string& process_type) override;
   bool ShouldLockSchemeRegistry() override;
 #if BUILDFLAG(IS_LINUX)
   void ZygoteForked() override;
 #endif
+
+  void InitializeMemorySystem();
 
  private:
   std::unique_ptr<content::ContentBrowserClient> browser_client_;
@@ -69,6 +70,8 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
   std::unique_ptr<content::ContentRendererClient> renderer_client_;
   std::unique_ptr<content::ContentUtilityClient> utility_client_;
   std::unique_ptr<tracing::TracingSamplerProfiler> tracing_sampler_profiler_;
+
+  memory_system::MemorySystem memory_system_;
 };
 
 }  // namespace electron

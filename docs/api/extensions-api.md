@@ -57,7 +57,7 @@ The following methods are available on instances of `Extensions`:
 * `options` Object (optional)
   * `allowFileAccess` boolean - Whether to allow the extension to read local files over `file://`
     protocol and inject content scripts into `file://` pages. This is required e.g. for loading
-    devtools extensions on `file://` URLs. Defaults to false.
+    DevTools extensions on `file://` URLs. Defaults to false.
 
 Returns `Promise<Extension>` - resolves when the extension is loaded.
 
@@ -77,12 +77,13 @@ extension to be loaded.
 
 ```js
 const { app, session } = require('electron')
+
 const path = require('node:path')
 
 app.whenReady().then(async () => {
   await session.defaultSession.extensions.loadExtension(
     path.join(__dirname, 'react-devtools'),
-    // allowFileAccess is required to load the devtools extension on file:// URLs.
+    // allowFileAccess is required to load the DevTools extension on file:// URLs.
     { allowFileAccess: true }
   )
   // Note that in order to use the React DevTools extension, you'll need to
@@ -92,11 +93,13 @@ app.whenReady().then(async () => {
 
 This API does not support loading packed (.crx) extensions.
 
-**Note:** This API cannot be called before the `ready` event of the `app` module
-is emitted.
+> [!NOTE]
+> This API cannot be called before the `ready` event of the `app` module
+> is emitted.
 
-**Note:** Loading extensions into in-memory (non-persistent) sessions is not
-supported and will throw an error.
+> [!NOTE]
+> Loading extensions into in-memory (non-persistent) sessions is not
+> supported and will throw an error.
 
 #### `extensions.removeExtension(extensionId)`
 
@@ -104,8 +107,9 @@ supported and will throw an error.
 
 Unloads an extension.
 
-**Note:** This API cannot be called before the `ready` event of the `app` module
-is emitted.
+> [!NOTE]
+> This API cannot be called before the `ready` event of the `app` module
+> is emitted.
 
 #### `extensions.getExtension(extensionId)`
 
@@ -113,12 +117,14 @@ is emitted.
 
 Returns `Extension | null` - The loaded extension with the given ID.
 
-**Note:** This API cannot be called before the `ready` event of the `app` module
-is emitted.
+> [!NOTE]
+> This API cannot be called before the `ready` event of the `app` module
+> is emitted.
 
 #### `extensions.getAllExtensions()`
 
 Returns `Extension[]` - A list of all loaded extensions.
 
-**Note:** This API cannot be called before the `ready` event of the `app` module
-is emitted.
+> [!NOTE]
+> This API cannot be called before the `ready` event of the `app` module
+> is emitted.

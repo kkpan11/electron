@@ -8,18 +8,16 @@ import { setTimeout } from 'node:timers/promises';
 import { ifdescribe, ifit } from './lib/spec-helpers';
 import { closeAllWindows } from './lib/window-helpers';
 
-ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('desktopCapturer', () => {
-  let w: BrowserWindow;
+function getSourceTypes(): ('window' | 'screen')[] {
+  if (process.platform === 'linux') {
+    return ['screen'];
+  }
+  return ['window', 'screen'];
+}
 
-  before(async () => {
-    w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
-    await w.loadURL('about:blank');
-  });
-
-  after(closeAllWindows);
-
+describe('desktopCapturer', () => {
   it('should return a non-empty array of sources', async () => {
-    const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+    const sources = await desktopCapturer.getSources({ types: getSourceTypes() });
     expect(sources).to.be.an('array').that.is.not.empty();
   });
 
@@ -29,14 +27,15 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
   });
 
   it('does not throw an error when called more than once (regression)', async () => {
-    const sources1 = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+    const sources1 = await desktopCapturer.getSources({ types: getSourceTypes() });
     expect(sources1).to.be.an('array').that.is.not.empty();
 
-    const sources2 = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+    const sources2 = await desktopCapturer.getSources({ types: getSourceTypes() });
     expect(sources2).to.be.an('array').that.is.not.empty();
   });
 
-  it('responds to subsequent calls of different options', async () => {
+  // Linux doesn't return any window sources.
+  ifit(process.platform !== 'linux')('responds to subsequent calls of different options', async () => {
     const promise1 = desktopCapturer.getSources({ types: ['window'] });
     await expect(promise1).to.eventually.be.fulfilled();
 
@@ -46,11 +45,11 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
 
   // Linux doesn't return any window sources.
   ifit(process.platform !== 'linux')('returns an empty display_id for window sources', async () => {
-    const w = new BrowserWindow({ width: 200, height: 200 });
-    await w.loadURL('about:blank');
+    const w2 = new BrowserWindow({ width: 200, height: 200 });
+    await w2.loadURL('about:blank');
 
     const sources = await desktopCapturer.getSources({ types: ['window'] });
-    w.destroy();
+    w2.destroy();
     expect(sources).to.be.an('array').that.is.not.empty();
     for (const { display_id: displayId } of sources) {
       expect(displayId).to.be.a('string').and.be.empty();
@@ -73,14 +72,16 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
     w2.show();
     await wShown;
 
-    const isNonEmpties: boolean[] = (await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      thumbnailSize: { width: 100, height: 100 }
-    })).map(s => s.thumbnail.constructor.name === 'NativeImage' && !s.thumbnail.isEmpty());
+    const isNonEmpties: boolean[] = (
+      await desktopCapturer.getSources({
+        types: getSourceTypes(),
+        thumbnailSize: { width: 100, height: 100 }
+      })
+    ).map((s) => s.thumbnail.constructor.name === 'NativeImage' && !s.thumbnail.isEmpty());
 
     w2.destroy();
     expect(isNonEmpties).to.be.an('array').that.is.not.empty();
-    expect(isNonEmpties.every(e => e === true)).to.be.true();
+    expect(isNonEmpties.every((e) => e === true)).to.be.true();
   });
 
   it('disabling thumbnail should return empty images', async () => {
@@ -89,39 +90,34 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
     w2.show();
     await wShown;
 
-    const isEmpties: boolean[] = (await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      thumbnailSize: { width: 0, height: 0 }
-    })).map(s => s.thumbnail.constructor.name === 'NativeImage' && s.thumbnail.isEmpty());
+    const isEmpties: boolean[] = (
+      await desktopCapturer.getSources({
+        types: getSourceTypes(),
+        thumbnailSize: { width: 0, height: 0 }
+      })
+    ).map((s) => s.thumbnail.constructor.name === 'NativeImage' && s.thumbnail.isEmpty());
 
     w2.destroy();
     expect(isEmpties).to.be.an('array').that.is.not.empty();
-    expect(isEmpties.every(e => e === true)).to.be.true();
+    expect(isEmpties.every((e) => e === true)).to.be.true();
   });
 
-  it('getMediaSourceId should match DesktopCapturerSource.id', async () => {
-    const w = new BrowserWindow({ show: false, width: 100, height: 100, webPreferences: { contextIsolation: false } });
-    const wShown = once(w, 'show');
-    const wFocused = once(w, 'focus');
-    w.show();
-    w.focus();
+  // Linux doesn't return any window sources.
+  ifit(process.platform !== 'linux')('getMediaSourceId should match DesktopCapturerSource.id', async function () {
+    const w2 = new BrowserWindow({ show: false, width: 100, height: 100, webPreferences: { contextIsolation: false } });
+    const wShown = once(w2, 'show');
+    const wFocused = once(w2, 'focus');
+    w2.show();
+    w2.focus();
     await wShown;
     await wFocused;
 
-    const mediaSourceId = w.getMediaSourceId();
+    const mediaSourceId = w2.getMediaSourceId();
     const sources = await desktopCapturer.getSources({
       types: ['window'],
       thumbnailSize: { width: 0, height: 0 }
     });
-    w.destroy();
-
-    // TODO(julien.isorce): investigate why |sources| is empty on the linux
-    // bots while it is not on my workstation, as expected, with and without
-    // the --ci parameter.
-    if (process.platform === 'linux' && sources.length === 0) {
-      it.skip('desktopCapturer.getSources returned an empty source list');
-      return;
-    }
+    w2.destroy();
 
     expect(sources).to.be.an('array').that.is.not.empty();
     const foundSource = sources.find((source) => {
@@ -130,18 +126,19 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
     expect(mediaSourceId).to.equal(foundSource!.id);
   });
 
-  it('getSources should not incorrectly duplicate window_id', async () => {
-    const w = new BrowserWindow({ show: false, width: 100, height: 100, webPreferences: { contextIsolation: false } });
-    const wShown = once(w, 'show');
-    const wFocused = once(w, 'focus');
-    w.show();
-    w.focus();
+  // Linux doesn't return any window sources.
+  ifit(process.platform !== 'linux')('getSources should not incorrectly duplicate window_id', async function () {
+    const w2 = new BrowserWindow({ show: false, width: 100, height: 100, webPreferences: { contextIsolation: false } });
+    const wShown = once(w2, 'show');
+    const wFocused = once(w2, 'focus');
+    w2.show();
+    w2.focus();
     await wShown;
     await wFocused;
 
     // ensure window_id isn't duplicated in getMediaSourceId,
     // which uses a different method than getSources
-    const mediaSourceId = w.getMediaSourceId();
+    const mediaSourceId = w2.getMediaSourceId();
     const ids = mediaSourceId.split(':');
     expect(ids[1]).to.not.equal(ids[2]);
 
@@ -149,15 +146,7 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
       types: ['window'],
       thumbnailSize: { width: 0, height: 0 }
     });
-    w.destroy();
-
-    // TODO(julien.isorce): investigate why |sources| is empty on the linux
-    // bots while it is not on my workstation, as expected, with and without
-    // the --ci parameter.
-    if (process.platform === 'linux' && sources.length === 0) {
-      it.skip('desktopCapturer.getSources returned an empty source list');
-      return;
-    }
+    w2.destroy();
 
     expect(sources).to.be.an('array').that.is.not.empty();
     for (const source of sources) {
@@ -168,19 +157,23 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
 
   // Regression test - see https://github.com/electron/electron/issues/43002
   it('does not affect window resizable state', async () => {
+    const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    await w.loadURL('about:blank');
     w.resizable = false;
 
     const wShown = once(w, 'show');
     w.show();
     await wShown;
 
-    const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+    const sources = await desktopCapturer.getSources({ types: getSourceTypes() });
     expect(sources).to.be.an('array').that.is.not.empty();
 
     expect(w.resizable).to.be.false();
+    await closeAllWindows();
   });
 
-  it('moveAbove should move the window at the requested place', async () => {
+  // Linux doesn't return any window sources.
+  ifit(process.platform !== 'linux')('moveAbove should move the window at the requested place', async function () {
     // DesktopCapturer.getSources() is guaranteed to return in the correct
     // z-order from foreground to background.
     const MAX_WIN = 4;
@@ -220,15 +213,6 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
         thumbnailSize: { width: 0, height: 0 }
       });
 
-      // TODO(julien.isorce): investigate why |sources| is empty on the linux
-      // bots while it is not on my workstation, as expected, with and without
-      // the --ci parameter.
-      if (process.platform === 'linux' && sources.length === 0) {
-        destroyWindows();
-        it.skip('desktopCapturer.getSources returned an empty source list');
-        return;
-      }
-
       expect(sources).to.be.an('array').that.is.not.empty();
       expect(sources.length).to.gte(MAX_WIN);
 
@@ -241,8 +225,7 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
       // If they're not, skip remaining checks because either focus or
       // window placement are not reliable in the running test environment.
       const wListReversed = wList.slice().reverse();
-      const proceed = sources.every(
-        (source, index) => source.id === wListReversed[index].getMediaSourceId());
+      const proceed = sources.every((source, index) => source.id === wListReversed[index].getMediaSourceId());
       if (!proceed) return;
 
       // Move windows so wList is sorted from foreground to background.
@@ -273,5 +256,60 @@ ifdescribe(!process.arch.includes('arm') && process.platform !== 'win32')('deskt
     } finally {
       destroyWindows();
     }
+  });
+
+  // Linux doesn't return any window sources.
+  ifdescribe(process.platform !== 'linux')('fetchWindowIcons', function () {
+    // Tests are sequentially dependent
+    this.bail(true);
+    let w: BrowserWindow;
+    let testSource: Electron.DesktopCapturerSource | undefined;
+    let appIcon: Electron.NativeImage | undefined;
+
+    before(async () => {
+      w = new BrowserWindow({
+        width: 200,
+        height: 200,
+        show: true,
+        title: 'desktop-capturer-test-window'
+      });
+      await w.loadURL('about:blank');
+      const sources = await desktopCapturer.getSources({
+        types: ['window'],
+        fetchWindowIcons: true
+      });
+      testSource = sources.find((s) => s.name === 'desktop-capturer-test-window');
+      appIcon = testSource?.appIcon;
+    });
+
+    after(() => {
+      if (w) w.destroy();
+    });
+
+    it('should find the test window in the list of captured sources', () => {
+      expect(testSource, `The ${w.getTitle()} window was not found by desktopCapturer`).to.exist();
+    });
+
+    it('should return a non-null appIcon for the captured window', () => {
+      expect(appIcon, 'appIcon property is null or undefined').to.exist();
+    });
+
+    it('should return an appIcon that is not an empty image', () => {
+      expect(appIcon?.isEmpty()).to.be.false();
+    });
+
+    it('should return an appIcon that encodes to a valid PNG data URL', () => {
+      const url = appIcon?.toDataURL();
+      expect(url).to.be.a('string');
+      // This is header 'data:image/png;base64,' length;
+      expect(url?.length).to.be.greaterThan(22);
+      expect(url?.startsWith('data:image/png;base64,')).to.be.true();
+    });
+
+    it('should return an appIcon with dimensions greater than 0x0 pixels', () => {
+      const { width, height } = appIcon?.getSize() || { width: 0, height: 0 };
+      expect(width).to.be.greaterThan(0);
+      expect(height).to.be.greaterThan(0);
+    });
   });
 });

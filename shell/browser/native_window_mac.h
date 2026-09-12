@@ -33,14 +33,16 @@ class NativeWindowMac : public NativeWindow,
                         public ui::NativeThemeObserver,
                         public display::DisplayObserver {
  public:
-  NativeWindowMac(const gin_helper::Dictionary& options, NativeWindow* parent);
+  NativeWindowMac(int32_t base_window_id,
+                  const gin_helper::Dictionary& options,
+                  NativeWindow* parent);
   ~NativeWindowMac() override;
 
   // NativeWindow:
   void OnTitleChanged() override;
   void SetContentView(views::View* view) override;
-  void CloseImpl() override;
-  void CloseImmediatelyImpl() override;
+  void Close() override;
+  void CloseImmediately() override;
   void Focus(bool focus) override;
   bool IsFocused() const override;
   void Show() override;
@@ -57,7 +59,7 @@ class NativeWindowMac : public NativeWindow,
   bool IsMinimized() const override;
   void SetFullScreen(bool fullscreen) override;
   bool IsFullscreen() const override;
-  void SetBounds(const gfx::Rect& bounds, bool animate = false) override;
+  void SetBounds(const gfx::Rect& bounds, bool animate) override;
   gfx::Rect GetBounds() const override;
   bool IsNormal() const override;
   gfx::Rect GetNormalBounds() const override;
@@ -169,10 +171,18 @@ class NativeWindowMac : public NativeWindow,
   void NotifyWindowDidFailToEnterFullScreen();
   void NotifyWindowWillLeaveFullScreen();
 
+  // Hide/show traffic light buttons around miniaturize/deminiaturize to
+  // prevent them from flashing at the default position during the restore
+  // animation when a custom trafficLightPosition is configured.
+  void HideTrafficLights();
+  void RestoreTrafficLights();
+
   // Cleanup observers when window is getting closed. Note that the destructor
   // can be called much later after window gets closed, so we should not do
   // cleanup in destructor.
   void Cleanup();
+
+  void SetBorderless(bool borderless);
 
   void UpdateVibrancyRadii(bool fullscreen);
 
@@ -222,7 +232,7 @@ class NativeWindowMac : public NativeWindow,
   // views::WidgetDelegate:
   views::View* GetContentsView() override;
   bool CanMaximize() const override;
-  std::unique_ptr<views::NonClientFrameView> CreateNonClientFrameView(
+  std::unique_ptr<views::FrameView> CreateFrameView(
       views::Widget* widget) override;
   void OnWidgetInitialized() override;
 
@@ -242,6 +252,8 @@ class NativeWindowMac : public NativeWindow,
   void SetForwardMouseMessages(bool forward);
 
   void UpdateZoomButton();
+
+  int FrameViewNonClientHitTest(const gfx::Point& point);
 
   ElectronNSWindow* window_;  // Weak ref, managed by widget_.
 

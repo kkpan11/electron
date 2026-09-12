@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "base/strings/utf_string_conversions.h"
-#include "gin/handle.h"
 #include "net/base/filename_util.h"
 #include "shell/browser/electron_browser_main_parts.h"
 #include "shell/common/gin_converters/file_dialog_converter.h"
@@ -15,7 +14,12 @@
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "url/gurl.h"
+#include "url/origin.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace gin {
 
@@ -58,32 +62,31 @@ namespace {
 // api::DownloadItem are fully independent, and either one may be destroyed
 // before the other.
 struct UserDataLink : base::SupportsUserData::Data {
-  explicit UserDataLink(base::WeakPtr<DownloadItem> item)
-      : download_item(item) {}
+  explicit UserDataLink(DownloadItem* item) : download_item(item) {}
 
-  base::WeakPtr<DownloadItem> download_item;
+  cppgc::WeakPersistent<DownloadItem> download_item;
 };
 
 const void* kElectronApiDownloadItemKey = &kElectronApiDownloadItemKey;
 
 }  // namespace
 
-gin::WrapperInfo DownloadItem::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo DownloadItem::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronDownloadItem);
 
 // static
 DownloadItem* DownloadItem::FromDownloadItem(download::DownloadItem* item) {
   // ^- say that 7 times fast in a row
   auto* data = static_cast<UserDataLink*>(
       item->GetUserData(kElectronApiDownloadItemKey));
-  return data ? data->download_item.get() : nullptr;
+  return data ? data->download_item.Get() : nullptr;
 }
 
 DownloadItem::DownloadItem(v8::Isolate* isolate, download::DownloadItem* item)
     : download_item_(item), isolate_(isolate) {
   download_item_->AddObserver(this);
-  download_item_->SetUserData(
-      kElectronApiDownloadItemKey,
-      std::make_unique<UserDataLink>(weak_factory_.GetWeakPtr()));
+  download_item_->SetUserData(kElectronApiDownloadItemKey,
+                              std::make_unique<UserDataLink>(this));
 }
 
 DownloadItem::~DownloadItem() {
@@ -108,7 +111,7 @@ void DownloadItem::OnDownloadUpdated(download::DownloadItem* item) {
     return;
   if (download_item_->IsDone()) {
     Emit("done", item->GetState());
-    Unpin();
+    keep_alive_.Clear();
   } else {
     Emit("updated", item->GetState());
   }
@@ -116,7 +119,7 @@ void DownloadItem::OnDownloadUpdated(download::DownloadItem* item) {
 
 void DownloadItem::OnDownloadDestroyed(download::DownloadItem* /*item*/) {
   download_item_ = nullptr;
-  Unpin();
+  keep_alive_.Clear();
 }
 
 void DownloadItem::Pause() {
@@ -207,6 +210,14 @@ const GURL& DownloadItem::GetURL() const {
   return download_item_->GetURL();
 }
 
+std::string DownloadItem::GetInitiatorOrigin() const {
+  if (!CheckAlive())
+    return {};
+  const std::optional<url::Origin>& initiator =
+      download_item_->GetRequestInitiator();
+  return initiator ? initiator->Serialize() : std::string();
+}
+
 v8::Local<v8::Value> DownloadItem::GetURLChain() const {
   if (!CheckAlive())
     return {};
@@ -217,12 +228,6 @@ download::DownloadItem::DownloadState DownloadItem::GetState() const {
   if (!CheckAlive())
     return download::DownloadItem::IN_PROGRESS;
   return download_item_->GetState();
-}
-
-bool DownloadItem::IsDone() const {
-  if (!CheckAlive())
-    return false;
-  return download_item_->IsDone();
 }
 
 void DownloadItem::SetSavePath(const base::FilePath& path) {
@@ -287,8 +292,8 @@ gin::ObjectTemplateBuilder DownloadItem::GetObjectTemplateBuilder(
       .SetMethod("getContentDisposition", &DownloadItem::GetContentDisposition)
       .SetMethod("getURL", &DownloadItem::GetURL)
       .SetMethod("getURLChain", &DownloadItem::GetURLChain)
+      .SetMethod("getInitiatorOrigin", &DownloadItem::GetInitiatorOrigin)
       .SetMethod("getState", &DownloadItem::GetState)
-      .SetMethod("isDone", &DownloadItem::IsDone)
       .SetMethod("setSavePath", &DownloadItem::SetSavePath)
       .SetMethod("getSavePath", &DownloadItem::GetSavePath)
       .SetProperty("savePath", &DownloadItem::GetSavePath,
@@ -301,23 +306,23 @@ gin::ObjectTemplateBuilder DownloadItem::GetObjectTemplateBuilder(
       .SetMethod("getEndTime", &DownloadItem::GetEndTime);
 }
 
-const char* DownloadItem::GetTypeName() {
-  return "DownloadItem";
+const gin::WrapperInfo* DownloadItem::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* DownloadItem::GetHumanReadableName() const {
+  return "Electron / DownloadItem";
 }
 
 // static
-gin::Handle<DownloadItem> DownloadItem::FromOrCreate(
-    v8::Isolate* isolate,
-    download::DownloadItem* item) {
+DownloadItem* DownloadItem::FromOrCreate(v8::Isolate* isolate,
+                                         download::DownloadItem* item) {
   DownloadItem* existing = FromDownloadItem(item);
   if (existing)
-    return gin::CreateHandle(isolate, existing);
+    return existing;
 
-  auto handle = gin::CreateHandle(isolate, new DownloadItem(isolate, item));
-
-  handle->Pin(isolate);
-
-  return handle;
+  return cppgc::MakeGarbageCollected<DownloadItem>(
+      isolate->GetCppHeap()->GetAllocationHandle(), isolate, item);
 }
 
 }  // namespace electron::api

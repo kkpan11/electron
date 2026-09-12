@@ -47,14 +47,13 @@ class ViewsDelegate : public views::ViewsDelegate {
 #elif BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS)
   gfx::ImageSkia* GetDefaultWindowIcon() const override;
 #endif
-  std::unique_ptr<views::NonClientFrameView> CreateDefaultNonClientFrameView(
+  std::unique_ptr<views::FrameView> CreateDefaultFrameView(
       views::Widget* widget) override;
   void AddRef() override {}
   void ReleaseRef() override {}
   void OnBeforeWidgetInit(
       views::Widget::InitParams* params,
       views::internal::NativeWidgetDelegate* delegate) override;
-  bool WindowManagerProvidesTitleBar(bool maximized) override;
 
  private:
 #if BUILDFLAG(IS_WIN)

@@ -29,12 +29,15 @@ class TrayIconCocoa : public TrayIcon {
   std::string GetTitle() override;
   void SetIgnoreDoubleClickEvents(bool ignore) override;
   bool GetIgnoreDoubleClickEvents() override;
-  void PopUpOnUI(base::WeakPtr<ElectronMenuModel> menu_model);
+  void PopUpOnUI(base::WeakPtr<ElectronMenuModel> menu_model,
+                 base::ScopedClosureRunner retain_menu);
   void PopUpContextMenu(const gfx::Point& pos,
-                        base::WeakPtr<ElectronMenuModel> menu_model) override;
+                        base::WeakPtr<ElectronMenuModel> menu_model,
+                        base::ScopedClosureRunner retain_menu) override;
   void CloseContextMenu() override;
   void SetContextMenu(raw_ptr<ElectronMenuModel> menu_model) override;
   gfx::Rect GetBounds() override;
+  void SetAutoSaveName(const std::string& name) override;
 
   base::WeakPtr<TrayIconCocoa> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();

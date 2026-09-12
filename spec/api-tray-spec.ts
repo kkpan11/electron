@@ -11,7 +11,9 @@ import { ifdescribe, ifit } from './lib/spec-helpers';
 describe('tray module', () => {
   let tray: Tray;
 
-  beforeEach(() => { tray = new Tray(nativeImage.createEmpty()); });
+  beforeEach(() => {
+    tray = new Tray(nativeImage.createEmpty());
+  });
 
   afterEach(() => {
     tray.destroy();
@@ -30,13 +32,13 @@ describe('tray module', () => {
       }).to.throw(/Failed to load image from path (.+)/);
     });
 
-    ifit(process.platform === 'win32')('throws a descriptive error if an invalid guid is given', () => {
+    ifit(process.platform !== 'linux')('throws a descriptive error if an invalid guid is given', () => {
       expect(() => {
         tray = new Tray(nativeImage.createEmpty(), 'I am not a guid');
       }).to.throw('Invalid GUID format');
     });
 
-    ifit(process.platform === 'win32')('accepts a valid guid', () => {
+    ifit(process.platform !== 'linux')('accepts a valid guid', () => {
       expect(() => {
         tray = new Tray(nativeImage.createEmpty(), '0019A433-3526-48BA-A66C-676742C0FEFB');
       }).to.not.throw();
@@ -63,8 +65,12 @@ describe('tray module', () => {
 
   describe('tray.setContextMenu(menu)', () => {
     it('accepts both null and Menu as parameters', () => {
-      expect(() => { tray.setContextMenu(new Menu()); }).to.not.throw();
-      expect(() => { tray.setContextMenu(null); }).to.not.throw();
+      expect(() => {
+        tray.setContextMenu(new Menu());
+      }).to.not.throw();
+      expect(() => {
+        tray.setContextMenu(null);
+      }).to.not.throw();
     });
   });
 
@@ -129,7 +135,9 @@ describe('tray module', () => {
   });
 
   describe('tray.getBounds()', () => {
-    afterEach(() => { tray.destroy(); });
+    afterEach(() => {
+      tray.destroy();
+    });
 
     ifit(process.platform !== 'linux')('returns a bounds object', function () {
       const bounds = tray.getBounds();

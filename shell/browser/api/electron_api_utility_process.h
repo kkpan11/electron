@@ -9,24 +9,30 @@
 #include <memory>
 #include <string>
 
-#include "base/containers/id_map.h"
+#include "base/callback_list.h"
 #include "base/environment.h"
-#include "base/memory/weak_ptr.h"
 #include "base/process/process_handle.h"
+#include "content/public/browser/browser_child_process_observer.h"
 #include "content/public/browser/service_process_host.h"
+#include "electron/buildflags/buildflags.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
 #include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "shell/browser/event_emitter_mixin.h"
 #include "shell/browser/net/url_loader_network_observer.h"
-#include "shell/common/gin_helper/pinnable.h"
+#include "shell/common/gc_plugin.h"
+#include "shell/common/gin_helper/self_keep_alive.h"
 #include "shell/services/node/public/mojom/node_service.mojom.h"
 #include "v8/include/v8-forward.h"
 
+#if BUILDFLAG(ENABLE_PROMPT_API)
+#include "third_party/blink/public/common/tokens/tokens.h"
+#include "third_party/blink/public/mojom/ai/ai_manager.mojom.h"
+#endif  // BUILDFLAG(ENABLE_PROMPT_API)
+
 namespace gin {
 class Arguments;
-template <typename T>
-class Handle;
 }  // namespace gin
 
 namespace base {
@@ -39,41 +45,63 @@ class Connector;
 
 namespace electron::api {
 
+class Session;
+
 class UtilityProcessWrapper final
     : public gin::Wrappable<UtilityProcessWrapper>,
-      public gin_helper::Pinnable<UtilityProcessWrapper>,
       public gin_helper::EventEmitterMixin<UtilityProcessWrapper>,
       private mojo::MessageReceiver,
       public node::mojom::NodeServiceClient,
-      public content::ServiceProcessHost::Observer {
+      public content::ServiceProcessHost::Observer,
+      public content::BrowserChildProcessObserver {
  public:
   enum class IOHandle : size_t { STDIN = 0, STDOUT = 1, STDERR = 2 };
   enum class IOType { IO_PIPE, IO_INHERIT, IO_IGNORE };
 
-  ~UtilityProcessWrapper() override;
-  static gin::Handle<UtilityProcessWrapper> Create(gin::Arguments* args);
-  static raw_ptr<UtilityProcessWrapper> FromProcessId(base::ProcessId pid);
-
-  void Shutdown(uint64_t exit_code);
-
-  // gin::Wrappable
-  static gin::WrapperInfo kWrapperInfo;
-  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
-      v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
-
- private:
   UtilityProcessWrapper(node::mojom::NodeServiceParamsPtr params,
                         std::u16string display_name,
                         std::map<IOHandle, IOType> stdio,
                         base::EnvironmentMap env_map,
                         base::FilePath current_working_directory,
                         bool use_plugin_helper,
-                        bool create_network_observer);
+                        bool create_network_observer,
+                        bool disclaim_responsibility,
+                        Session* session);
+  ~UtilityProcessWrapper() override;
+
+  static UtilityProcessWrapper* Create(gin::Arguments* args);
+  static UtilityProcessWrapper* FromProcessId(base::ProcessId pid);
+
+#if BUILDFLAG(ENABLE_PROMPT_API)
+  void BindAIManager(std::optional<int32_t> web_contents_id,
+                     const url::Origin& security_origin,
+                     const blink::LocalFrameToken& frame_token,
+                     int32_t render_process_id,
+                     mojo::PendingReceiver<blink::mojom::AIManager> ai_manager);
+#endif  // BUILDFLAG(ENABLE_PROMPT_API)
+
+  void Shutdown(uint32_t exit_code);
+
+  bool has_session() const { return session_.Get(); }
+
+  // gin::Wrappable
+  static const gin::WrapperInfo kWrapperInfo;
+  static const char* GetClassName() { return "UtilityProcess"; }
+  void Trace(cppgc::Visitor*) const override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+
+ protected:
+  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
+      v8::Isolate* isolate) override;
+
+ private:
   void OnServiceProcessLaunch(const base::Process& process);
   void CloseConnectorPort();
+  void CloseStdioReadFds();
 
-  void HandleTermination(uint64_t exit_code);
+  void HandleTermination(uint32_t exit_code);
+  bool IsThisProcess(const content::ChildProcessData& data) const;
 
   void PostMessage(gin::Arguments* args);
   bool Kill();
@@ -89,11 +117,22 @@ class UtilityProcessWrapper final
   // content::ServiceProcessHost::Observer
   void OnServiceProcessTerminatedNormally(
       const content::ServiceProcessInfo& info) override;
-  void OnServiceProcessCrashed(
-      const content::ServiceProcessInfo& info) override;
+
+  // content::BrowserChildProcessObserver
+  void BrowserChildProcessCrashed(
+      const content::ChildProcessData& data,
+      const content::ChildProcessTerminationInfo& info) override;
+  void BrowserChildProcessKilled(
+      const content::ChildProcessData& data,
+      const content::ChildProcessTerminationInfo& info) override;
 
   void OnServiceProcessDisconnected(uint32_t exit_code,
                                     const std::string& description);
+
+  // Creates and sends a new URLLoaderFactory to the utility process.
+  // Called after Network Service restart to update the factory.
+  void CreateAndSendURLLoaderFactory(bool crashed);
+  node::mojom::URLLoaderFactoryParamsPtr CreateURLLoaderFactoryParams();
 
   base::ProcessId pid_ = base::kNullProcessId;
 #if BUILDFLAG(IS_WIN)
@@ -107,13 +146,21 @@ class UtilityProcessWrapper final
   bool connector_closed_ = false;
   bool terminated_ = false;
   bool killed_ = false;
+  bool create_network_observer_ = false;
   std::unique_ptr<mojo::Connector> connector_;
   blink::MessagePortDescriptor host_port_;
+  GC_PLUGIN_IGNORE(
+      "Context tracking of receiver is not needed in the browser process.")
   mojo::Receiver<node::mojom::NodeServiceClient> receiver_{this};
+  GC_PLUGIN_IGNORE(
+      "Context tracking of remote is not needed in the browser process.")
   mojo::Remote<node::mojom::NodeService> node_service_remote_;
-  std::optional<electron::URLLoaderNetworkObserver>
+  cppgc::Member<Session> session_;
+  std::unique_ptr<electron::URLLoaderNetworkObserver>
       url_loader_network_observer_;
-  base::WeakPtrFactory<UtilityProcessWrapper> weak_factory_{this};
+  base::CallbackListSubscription network_service_gone_subscription_;
+  gin_helper::SelfKeepAlive<UtilityProcessWrapper> keep_alive_{this};
+  gin::WeakCellFactory<UtilityProcessWrapper> weak_factory_{this};
 };
 
 }  // namespace electron::api

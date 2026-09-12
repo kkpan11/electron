@@ -5,12 +5,12 @@
 By default, windows are dragged using the title bar provided by the OS chrome. Apps
 that remove the default title bar need to use the `app-region` CSS property to define
 specific areas that can be used to drag the window. Setting `app-region: drag` marks
-a rectagular area as draggable.
+a rectangular area as draggable.
 
 It is important to note that draggable areas ignore all pointer events. For example,
 a button element that overlaps a draggable region will not emit mouse clicks or mouse
 enter/exit events within that overlapping area. Setting `app-region: no-drag` reenables
-pointer events by excluding a rectagular area from a draggable region.
+pointer events by excluding a rectangular area from a draggable region.
 
 To make the whole window draggable, you can add `app-region: drag` as
 `body`'s style:
@@ -47,6 +47,13 @@ To prevent this, you need to disable text selection within a draggable area like
 }
 ```
 
+> [!TIP]
+> When developing, set the [`ELECTRON_DEBUG_DRAGGABLE_REGIONS`](../api/environment-variables.md#electron_debug_draggable_regions-experimental)
+> environment variable to paint the draggable regions Electron is using on top
+> of the window, and to log how often they change and what they cost. It is an
+> experimental debugging aid rather than a formal API, and may change or be
+> removed without warning.
+
 ### Tip: disable context menus
 
 On some platforms, the draggable area will be treated as a non-client frame, so
@@ -62,6 +69,7 @@ API:
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow()
 win.setIgnoreMouseEvents(true)
 ```
@@ -75,6 +83,7 @@ allowing events such as `mouseleave` to be emitted:
 
 ```js title='main.js'
 const { BrowserWindow, ipcMain } = require('electron')
+
 const path = require('node:path')
 
 const win = new BrowserWindow({

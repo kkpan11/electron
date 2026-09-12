@@ -70,7 +70,7 @@ UsbChooserContext::UsbChooserContext(ElectronBrowserContext* context)
 // static
 base::Value UsbChooserContext::DeviceInfoToValue(
     const device::mojom::UsbDeviceInfo& device_info) {
-  base::Value::Dict device_value;
+  base::DictValue device_value;
   device_value.Set(kDeviceNameKey, device_info.product_name
                                        ? *device_info.product_name
                                        : std::u16string_view());
@@ -98,6 +98,98 @@ base::Value UsbChooserContext::DeviceInfoToValue(
   device_value.Set("deviceVersionMinor", device_info.device_version_minor);
   device_value.Set("deviceVersionSubminor",
                    device_info.device_version_subminor);
+
+  bool has_active_configuration = false;
+  base::ListValue configuration_list;
+  for (const auto& configuration : device_info.configurations) {
+    base::DictValue configuration_value;
+    configuration_value.Set("configurationValue",
+                            configuration->configuration_value);
+    configuration_value.Set("configurationName",
+                            configuration->configuration_name
+                                ? *configuration->configuration_name
+                                : std::u16string_view());
+
+    for (const auto& interface : configuration->interfaces) {
+      base::DictValue interface_value;
+      interface_value.Set("interfaceNumber", interface->interface_number);
+
+      base::ListValue alternate_list;
+      for (const auto& alternate : interface->alternates) {
+        base::DictValue alternate_value;
+        alternate_value.Set("alternateSetting", alternate->alternate_setting);
+        alternate_value.Set("interfaceClass", alternate->class_code);
+        alternate_value.Set("interfaceSubclass", alternate->subclass_code);
+        alternate_value.Set("interfaceProtocol", alternate->protocol_code);
+        alternate_value.Set("interfaceName", alternate->interface_name
+                                                 ? *alternate->interface_name
+                                                 : std::u16string_view());
+
+        base::ListValue endpoint_list;
+        for (const auto& endpoint : alternate->endpoints) {
+          base::DictValue endpoint_value;
+          endpoint_value.Set("endpointNumber", endpoint->endpoint_number);
+
+          bool inbound = endpoint->direction ==
+                         device::mojom::UsbTransferDirection::INBOUND;
+          endpoint_value.Set("direction", inbound ? "in" : "out");
+
+          std::string type;
+          switch (endpoint->type) {
+            case device::mojom::UsbTransferType::ISOCHRONOUS:
+              type = "isochronous";
+              break;
+            case device::mojom::UsbTransferType::BULK:
+              type = "bulk";
+              break;
+            case device::mojom::UsbTransferType::INTERRUPT:
+              type = "interrupt";
+              break;
+            default:
+              NOTREACHED() << "Unknown USB transfer type: "
+                           << static_cast<int>(endpoint->type);
+          }
+          endpoint_value.Set("type", type);
+          endpoint_value.Set("packetSize",
+                             static_cast<int>(endpoint->packet_size));
+          endpoint_list.Append(std::move(endpoint_value));
+        }
+
+        alternate_value.Set("endpoints", base::Value(std::move(endpoint_list)));
+
+        if (alternate->alternate_setting == 0) {
+          auto active_alternate_value = alternate_value.Clone();
+          interface_value.Set("alternate", std::move(active_alternate_value));
+        }
+
+        alternate_list.Append(std::move(alternate_value));
+      }
+
+      interface_value.Set("alternates", std::move(alternate_list));
+
+      configuration_value.Set("interfaces",
+                              base::Value(std::move(interface_value)));
+    }
+
+    if (device_info.active_configuration &&
+        device_info.active_configuration ==
+            configuration->configuration_value) {
+      auto active_configuration_value = configuration_value.Clone();
+      has_active_configuration = true;
+      configuration_value.Set("configuration",
+                              std::move(active_configuration_value));
+    }
+
+    configuration_list.Append(std::move(configuration_value));
+  }
+
+  device_value.Set("configurations", std::move(configuration_list));
+
+  // Set value for "configuration" to null if no active configuration.
+  if (!has_active_configuration) {
+    device_value.Set("configuration", base::Value());
+  }
+
   return base::Value(std::move(device_value));
 }
 
@@ -166,7 +258,7 @@ void UsbChooserContext::RevokeObjectPermissionInternal(
     const url::Origin& origin,
     const base::Value& object,
     bool revoked_by_website = false) {
-  const base::Value::Dict* object_dict = object.GetIfDict();
+  const base::DictValue* object_dict = object.GetIfDict();
   DCHECK(object_dict != nullptr);
 
   if (object_dict->FindString(kDeviceSerialNumberKey) != nullptr) {
@@ -184,14 +276,15 @@ void UsbChooserContext::RevokeObjectPermissionInternal(
     }
   }
 
-  api::Session* session = api::Session::FromBrowserContext(browser_context_);
-  if (session) {
+  gin::WeakCell<api::Session>* session =
+      api::Session::FromBrowserContext(browser_context_);
+  if (session && session->Get()) {
     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
     v8::HandleScope scope(isolate);
     auto details = gin_helper::Dictionary::CreateEmpty(isolate);
     details.Set("device", object);
     details.Set("origin", origin.Serialize());
-    session->Emit("usb-device-revoked", details);
+    session->Get()->Emit("usb-device-revoked", details);
   }
 }
 

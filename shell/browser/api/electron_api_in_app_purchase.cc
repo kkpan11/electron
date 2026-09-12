@@ -8,11 +8,16 @@
 #include <utility>
 #include <vector>
 
-#include "gin/handle.h"
+#include "gin/persistent.h"
+#include "shell/browser/mac/in_app_purchase.h"
+#include "shell/browser/mac/in_app_purchase_product.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace gin {
 
@@ -130,12 +135,20 @@ struct Converter<in_app_purchase::Product> {
 
 namespace electron::api {
 
-gin::WrapperInfo InAppPurchase::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo InAppPurchase::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronInAppPurchase);
 
 #if BUILDFLAG(IS_MAC)
 // static
-gin::Handle<InAppPurchase> InAppPurchase::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, new InAppPurchase());
+InAppPurchase* InAppPurchase::Create(v8::Isolate* isolate) {
+  auto& allocation_handle = isolate->GetCppHeap()->GetAllocationHandle();
+  auto* in_app_purchase =
+      cppgc::MakeGarbageCollected<InAppPurchase>(allocation_handle);
+  in_app_purchase->StartObserving(base::BindRepeating(
+      &InAppPurchase::OnTransactionsUpdated,
+      gin::WrapPersistent(
+          in_app_purchase->weak_factory_.GetWeakCell(allocation_handle))));
+  return in_app_purchase;
 }
 
 gin::ObjectTemplateBuilder InAppPurchase::GetObjectTemplateBuilder(
@@ -154,8 +167,17 @@ gin::ObjectTemplateBuilder InAppPurchase::GetObjectTemplateBuilder(
       .SetMethod("getProducts", &InAppPurchase::GetProducts);
 }
 
-const char* InAppPurchase::GetTypeName() {
-  return "InAppPurchase";
+const gin::WrapperInfo* InAppPurchase::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* InAppPurchase::GetHumanReadableName() const {
+  return "Electron / InAppPurchase";
+}
+
+void InAppPurchase::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<InAppPurchase>::Trace(visitor);
+  visitor->Trace(weak_factory_);
 }
 
 InAppPurchase::InAppPurchase() = default;
@@ -215,8 +237,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Context> context,
                 void* priv) {
 #if BUILDFLAG(IS_MAC)
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.Set("inAppPurchase", InAppPurchase::Create(isolate));
 #endif
 }

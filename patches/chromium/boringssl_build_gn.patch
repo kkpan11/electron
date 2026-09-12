@@ -6,7 +6,7 @@ Subject: boringssl BUILD.gn
 Build BoringSSL with some extra functions that nodejs needs.
 
 diff --git a/third_party/boringssl/BUILD.gn b/third_party/boringssl/BUILD.gn
-index b962901a7db8e6e50155dabbb1371124b12f9b26..b01e197ae2e411a376ffa28b9058d62a16abf23b 100644
+index c77dc4129793fedbf9f88d96588917800aba4249..2a70901f6d000fcea4e506e06516e799fa962661 100644
 --- a/third_party/boringssl/BUILD.gn
 +++ b/third_party/boringssl/BUILD.gn
 @@ -48,6 +48,21 @@ all_sources = bcm_internal_headers + bcm_sources + crypto_internal_headers +

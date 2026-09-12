@@ -12,10 +12,12 @@
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
-#include "shell/browser/web_contents_permission_helper.h"
+#include "shell/browser/api/electron_api_web_contents.h"
+#include "shell/browser/preload_code_cache.h"
 #include "third_party/blink/public/mojom/permissions/permission_status.mojom.h"
 
 namespace electron {
+
 ElectronWebContentsUtilityHandlerImpl::ElectronWebContentsUtilityHandlerImpl(
     content::RenderFrameHost* frame_host,
     mojo::PendingAssociatedReceiver<mojom::ElectronWebContentsUtility> receiver)
@@ -59,19 +61,36 @@ void ElectronWebContentsUtilityHandlerImpl::SetTemporaryZoomLevel(
   }
 }
 
+void ElectronWebContentsUtilityHandlerImpl::SetPreloadCodeCache(
+    const std::string& id,
+    const std::vector<uint8_t>& source_hash,
+    mojo_base::BigBuffer cache) {
+  // Persist the freshly produced V8 code cache so subsequent navigations and
+  // launches compile this preload from bytecode instead of re-parsing source.
+  // Nothing the renderer sends here is trusted as cache-validation metadata:
+  // SetFromRenderer() only accepts the write if |id| was served to this exact
+  // frame and |source_hash| matches the hash the browser recorded for the
+  // bytes it served, and it persists the entry under that browser-recorded
+  // hash plus this frame's site.
+  preload_code_cache::SetFromRenderer(GetRenderFrameHost(), id, source_hash,
+                                      base::span<const uint8_t>(cache));
+}
+
 void ElectronWebContentsUtilityHandlerImpl::CanAccessClipboardDeprecated(
     mojom::PermissionName name,
     const blink::LocalFrameToken& frame_token,
     CanAccessClipboardDeprecatedCallback callback) {
   if (render_frame_host_token_.frame_token == frame_token) {
-    // Paste requires either (1) user activation, ...
-    if (web_contents()->HasRecentInteraction()) {
+    content::RenderFrameHost* render_frame_host = GetRenderFrameHost();
+    // Paste requires either (1) transient user activation on the requesting
+    // frame (activation propagates from a frame to its ancestors, not to
+    // unrelated frames in the page), ...
+    if (render_frame_host->HasTransientUserActivation()) {
       std::move(callback).Run(blink::mojom::PermissionStatus::GRANTED);
       return;
     }
 
     // (2) granted permission, ...
-    content::RenderFrameHost* render_frame_host = GetRenderFrameHost();
     content::BrowserContext* browser_context =
         render_frame_host->GetBrowserContext();
     content::PermissionController* permission_controller =

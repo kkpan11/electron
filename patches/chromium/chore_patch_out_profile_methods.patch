@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Charles Kerr <charles@charleskerr.com>
+Date: Wed, 17 May 2023 14:42:09 -0500
+Subject: chore: patch out Profile methods
+
+Electron does not support Profiles, so we need to patch it out of any
+code that we use.
+
+diff --git a/chrome/browser/pdf/chrome_pdf_stream_delegate.cc b/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
+index dd48ee2a99aeeddad66c95e7c61b17580bb523e5..1d7fa6c4a7956b9a356e4203e8c61eb78a0037f4 100644
+--- a/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
++++ b/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
+@@ -46,6 +46,7 @@ namespace {
+ // hierarchy is: enterprise policy > user choice > finch experiment.
+ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
+   CHECK(contents);
++#if 0
+   const PrefService* prefs =
+       Profile::FromBrowserContext(contents->GetBrowserContext())->GetPrefs();
+ 
+@@ -53,6 +54,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
+   if (prefs->IsManagedPreference(prefs::kPdfUseSkiaRendererEnabled)) {
+     return prefs->GetBoolean(prefs::kPdfUseSkiaRendererEnabled);
+   }
++#endif
+ 
+   //  When the enterprise policy is not set, use finch/feature flag choice.
+   return base::FeatureList::IsEnabled(
+@@ -64,6 +66,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
+ // priority hierarchy is: enterprise policy > user choice > finch experiment.
+ bool ShouldEnableXfaForms(content::WebContents* contents) {
+   CHECK(contents);
++#if 0
+   const PrefService* prefs =
+       Profile::FromBrowserContext(contents->GetBrowserContext())->GetPrefs();
+ 
+@@ -71,6 +74,7 @@ bool ShouldEnableXfaForms(content::WebContents* contents) {
+   if (prefs->IsManagedPreference(prefs::kPdfXfaFormsEnabled)) {
+     return prefs->GetBoolean(prefs::kPdfXfaFormsEnabled);
+   }
++#endif
+ 
+   //  When the enterprise policy is not set, use finch/feature flag choice.
+   return base::FeatureList::IsEnabled(chrome_pdf::features::kPdfXfaSupport);
+diff --git a/chrome/browser/pdf/pdf_extension_util.cc b/chrome/browser/pdf/pdf_extension_util.cc
+index 578e8975738e0da7719548bb47d13f7660c82215..a0427ca11c7a23ecce8cfb905053b5bc08485ea4 100644
+--- a/chrome/browser/pdf/pdf_extension_util.cc
++++ b/chrome/browser/pdf/pdf_extension_util.cc
+@@ -16,7 +16,6 @@
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
+-#include "chrome/browser/glic/public/glic_enabling.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/extensions/api/pdf_viewer_private.h"
+ #include "chrome/common/url_constants.h"
+@@ -285,10 +284,13 @@ bool IsPrintingEnabled(content::BrowserContext* context) {
+ 
+ #if BUILDFLAG(ENABLE_PDF_INK2)
+ bool IsPdfAnnotationsEnabledByPolicy(content::BrowserContext* context) {
++# if 0
+   PrefService* prefs =
+       context ? Profile::FromBrowserContext(context)->GetPrefs() : nullptr;
+   return !prefs || !prefs->IsManagedPreference(prefs::kPdfAnnotationsEnabled) ||
+          prefs->GetBoolean(prefs::kPdfAnnotationsEnabled);
++#endif
++  return true;
+ }
+ 
+ bool IsPdfInk2AnnotationsEnabled(content::BrowserContext* context) {
+@@ -506,11 +508,13 @@ bool ShouldShowGlicSummarizeButton(content::WebContents* web_contents) {
+     }
+   }
+ 
++#if 0
+   Profile* profile =
+       Profile::FromBrowserContext(web_contents->GetBrowserContext());
+   if (!glic::GlicEnabling::IsEnabledForProfile(profile)) {
+     return false;
+   }
++#endif
+ 
+   auto* tab_interface = tabs::TabInterface::MaybeGetFromContents(web_contents);
+   if (tab_interface && !tab_interface->IsInNormalWindow()) {
+diff --git a/chrome/browser/profiles/profile_selections.cc b/chrome/browser/profiles/profile_selections.cc
+index 2d83b0aaac61a8070e0372c265d029818e65689f..c370e87f03564f65e13b1cd5c18cda452d60daea 100644
+--- a/chrome/browser/profiles/profile_selections.cc
++++ b/chrome/browser/profiles/profile_selections.cc
+@@ -13,6 +13,7 @@
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ bool AreKeyedServicesDisabledForProfileByDefault(const Profile* profile) {
++#if 0
+   // By default disable all services for System Profile.
+   // Even though having no services is also the default value for Guest Profile,
+   // this is not really the case in practice because a lot of Service Factories
+@@ -20,7 +21,7 @@ bool AreKeyedServicesDisabledForProfileByDefault(const Profile* profile) {
+   if (profile && profile->IsSystemProfile()) {
+     return true;
+   }
+-
++#endif
+   return false;
+ }
+ 
+@@ -116,6 +117,7 @@ ProfileSelections ProfileSelections::BuildRedirectedInIncognito() {
+ }
+ 
+ Profile* ProfileSelections::ApplyProfileSelection(Profile* profile) const {
++#if 0
+   CHECK(profile);
+ 
+   ProfileSelection selection = GetProfileSelection(profile);
+@@ -131,6 +133,9 @@ Profile* ProfileSelections::ApplyProfileSelection(Profile* profile) const {
+     case ProfileSelection::kOffTheRecordOnly:
+       return profile->IsOffTheRecord() ? profile : nullptr;
+   }
++#else
++  return nullptr;
++#endif
+ }
+ 
+ ProfileSelection ProfileSelections::GetProfileSelection(
+diff --git a/chrome/browser/spellchecker/spellcheck_service.cc b/chrome/browser/spellchecker/spellcheck_service.cc
+index 4d538186fd804419f36c363d785376cbfbf9509d..93d81b0d1c37e7f4967bba16eb24c0db26773035 100644
+--- a/chrome/browser/spellchecker/spellcheck_service.cc
++++ b/chrome/browser/spellchecker/spellcheck_service.cc
+@@ -25,8 +25,10 @@
+ #include "base/timer/elapsed_timer.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#if 0
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profiles_state.h"
++#endif
+ #include "chrome/browser/search/search.h"
+ #include "chrome/browser/spellchecker/spellcheck_factory.h"
+ #include "chrome/browser/spellchecker/spellcheck_hunspell_dictionary.h"
+@@ -75,7 +77,10 @@ SpellcheckService::SpellCheckerBinder& GetSpellCheckerBinderOverride() {
+ // Only record spelling-configuration metrics for profiles in which the user
+ // can configure spelling.
+ bool RecordSpellingConfigurationMetrics(content::BrowserContext* context) {
++#if 0
+   return profiles::IsRegularUserProfile(Profile::FromBrowserContext(context));
++#endif
++  return true;
+ }
+ 
+ }  // namespace
+@@ -507,11 +512,13 @@ void SpellcheckService::InitForRenderer(content::RenderProcessHost* host) {
+       features::kInitialWebUIWithoutSpellCheck.Get()) {
+     return;
+   }
++#if 0
+   if (base::FeatureList::IsEnabled(
+           features::kInitialWebUIWithoutSpellCheckForNtp) &&
+       host->GetUserData(search::kIsNTPProcessKey)) {
+     return;
+   }
++#endif
+ 
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+ 

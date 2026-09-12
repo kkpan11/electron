@@ -7,10 +7,15 @@
 
 #include <map>
 #include <set>
+#include <string>
 
-#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/types/pass_key.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
-#include "shell/browser/net/web_request_api_interface.h"
+#include "net/base/completion_once_callback.h"
+#include "services/network/public/cpp/resource_request.h"
+#include "services/network/public/mojom/url_response_head.mojom-forward.h"
 
 class URLPattern;
 
@@ -19,82 +24,150 @@ class BrowserContext;
 }
 
 namespace extensions {
+struct WebRequestInfo;
 enum class WebRequestResourceType : uint8_t;
 }  // namespace extensions
 
 namespace gin {
 class Arguments;
-
-template <typename T>
-class Handle;
 }  // namespace gin
+
+namespace electron {
+class ElectronBrowserContext;
+}  // namespace electron
+
+namespace net {
+struct RedirectInfo;
+}
+namespace network {
+struct URLLoaderCompletionStatus;
+}
 
 namespace electron::api {
 
-class WebRequest final : public gin::Wrappable<WebRequest>,
-                         public WebRequestAPI {
+class Session;
+
+class WebRequest final : public gin::Wrappable<WebRequest> {
  public:
-  // Return the WebRequest object attached to |browser_context|, create if there
-  // is no one.
-  // Note that the lifetime of WebRequest object is managed by Session, instead
-  // of the caller.
-  static gin::Handle<WebRequest> FromOrCreate(
-      v8::Isolate* isolate,
-      content::BrowserContext* browser_context);
+  using BeforeSendHeadersCallback =
+      base::OnceCallback<void(const std::set<std::string>& removed_headers,
+                              const std::set<std::string>& set_headers,
+                              int error_code)>;
 
-  // Return a new WebRequest object, this should only be called by Session.
-  static gin::Handle<WebRequest> Create(
-      v8::Isolate* isolate,
-      content::BrowserContext* browser_context);
+  // AuthRequiredResponse indicates how an OnAuthRequired call is handled.
+  enum class AuthRequiredResponse {
+    // No credentials were provided.
+    AUTH_REQUIRED_RESPONSE_NO_ACTION,
+    // AuthCredentials is filled in with a username and password, which should
+    // be used in a response to the provided auth challenge.
+    AUTH_REQUIRED_RESPONSE_SET_AUTH,
+    // The request should be canceled.
+    AUTH_REQUIRED_RESPONSE_CANCEL_AUTH,
+    // The action will be decided asynchronously. |callback| will be invoked
+    // when the decision is made, and one of the other AuthRequiredResponse
+    // values will be passed in with the same semantics as described above.
+    AUTH_REQUIRED_RESPONSE_IO_PENDING,
+  };
 
-  // Find the WebRequest object attached to |browser_context|.
-  static gin::Handle<WebRequest> From(v8::Isolate* isolate,
-                                      content::BrowserContext* browser_context);
+  using AuthCallback = base::OnceCallback<void(AuthRequiredResponse)>;
+
+  // Convenience wrapper around api::Session::FromOrCreate()->WebRequest().
+  // Creates the Session and WebRequest if they don't already exist.
+  // Note that the WebRequest is owned by the session, not by the caller.
+  static WebRequest* FromOrCreate(v8::Isolate* isolate,
+                                  content::BrowserContext* browser_context);
+
+  // Return a new WebRequest object. This can only be called by api::Session.
+  static WebRequest* Create(
+      v8::Isolate* isolate,
+      base::PassKey<Session>,
+      base::WeakPtr<ElectronBrowserContext> browser_context);
+
+  // Make public for cppgc::MakeGarbageCollected.
+  WebRequest(base::PassKey<Session>,
+             base::WeakPtr<ElectronBrowserContext> browser_context);
+  ~WebRequest() override;
+
+  // disable copy
+  WebRequest(const WebRequest&) = delete;
+  WebRequest& operator=(const WebRequest&) = delete;
 
   static const char* GetClassName() { return "WebRequest"; }
 
   // gin::Wrappable:
-  static gin::WrapperInfo kWrapperInfo;
+  static const gin::WrapperInfo kWrapperInfo;
+  void Trace(cppgc::Visitor*) const override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
 
-  // WebRequestAPI:
-  bool HasListener() const override;
+  bool HasListener() const;
   int OnBeforeRequest(extensions::WebRequestInfo* info,
                       const network::ResourceRequest& request,
                       net::CompletionOnceCallback callback,
-                      GURL* new_url) override;
+                      GURL* new_url);
   int OnBeforeSendHeaders(extensions::WebRequestInfo* info,
                           const network::ResourceRequest& request,
                           BeforeSendHeadersCallback callback,
-                          net::HttpRequestHeaders* headers) override;
+                          net::HttpRequestHeaders* headers);
   int OnHeadersReceived(
       extensions::WebRequestInfo* info,
       const network::ResourceRequest& request,
       net::CompletionOnceCallback callback,
       const net::HttpResponseHeaders* original_response_headers,
       scoped_refptr<net::HttpResponseHeaders>* override_response_headers,
-      GURL* allowed_unsafe_redirect_url) override;
+      GURL* allowed_unsafe_redirect_url);
   void OnSendHeaders(extensions::WebRequestInfo* info,
                      const network::ResourceRequest& request,
-                     const net::HttpRequestHeaders& headers) override;
+                     const net::HttpRequestHeaders& headers);
+  AuthRequiredResponse OnAuthRequired(const extensions::WebRequestInfo* info,
+                                      const net::AuthChallengeInfo& auth_info,
+                                      AuthCallback callback,
+                                      net::AuthCredentials* credentials);
   void OnBeforeRedirect(extensions::WebRequestInfo* info,
                         const network::ResourceRequest& request,
-                        const GURL& new_location) override;
+                        const GURL& new_location);
   void OnResponseStarted(extensions::WebRequestInfo* info,
-                         const network::ResourceRequest& request) override;
+                         const network::ResourceRequest& request);
   void OnErrorOccurred(extensions::WebRequestInfo* info,
                        const network::ResourceRequest& request,
-                       int net_error) override;
+                       int net_error);
   void OnCompleted(extensions::WebRequestInfo* info,
                    const network::ResourceRequest& request,
-                   int net_error) override;
-  void OnRequestWillBeDestroyed(extensions::WebRequestInfo* info) override;
+                   int net_error);
+  void OnRequestWillBeDestroyed(extensions::WebRequestInfo* info);
+
+  // Requests that only observer listeners match take the direct network path;
+  // URLLoaderFactoryGate reports what they did afterwards, from the IO thread,
+  // to the WebRequest of `browser_context`'s session.
+  static void ObservedRequestStarted(
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      uint64_t key,
+      int render_process_id,
+      int frame_routing_id,
+      const network::ResourceRequest& request);
+  static void ObservedRequestRedirected(
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      uint64_t key,
+      const net::RedirectInfo& redirect_info,
+      network::mojom::URLResponseHeadPtr head);
+  static void ObservedRequestFollowedRedirect(
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      uint64_t key,
+      const network::ResourceRequest& request);
+  static void ObservedRequestResponded(
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      uint64_t key,
+      network::mojom::URLResponseHeadPtr head);
+  static void ObservedRequestFinished(
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+
+      uint64_t key,
+      const network::URLLoaderCompletionStatus& status);
 
  private:
-  WebRequest(v8::Isolate* isolate, content::BrowserContext* browser_context);
-  ~WebRequest() override;
+  base::WeakPtr<ElectronBrowserContext> browser_context_;
 
   // Contains info about requests that are blocked waiting for a response from
   // the user.
@@ -154,6 +227,12 @@ class WebRequest final : public gin::Wrappable<WebRequest>,
                                          v8::Local<v8::Value> response);
   void OnHeadersReceivedListenerResult(uint64_t id,
                                        v8::Local<v8::Value> response);
+  // Callback invoked by LoginHandler when auth credentials are supplied via
+  // the unified 'login' event. Bridges back into WebRequest's AuthCallback.
+  void OnLoginAuthResult(
+      uint64_t id,
+      net::AuthCredentials* credentials,
+      const std::optional<net::AuthCredentials>& maybe_creds);
 
   class RequestFilter {
    public:
@@ -171,7 +250,9 @@ class WebRequest final : public gin::Wrappable<WebRequest>,
                         bool is_match_pattern = true);
     void AddType(extensions::WebRequestResourceType type);
 
-    bool MatchesRequest(extensions::WebRequestInfo* info) const;
+    bool MatchesRequest(const extensions::WebRequestInfo* info) const;
+    // Bit per WebRequestResourceType; all bits when no type filter was given.
+    uint32_t TypeMask() const;
 
    private:
     bool MatchesURL(const GURL& url,
@@ -205,8 +286,14 @@ class WebRequest final : public gin::Wrappable<WebRequest>,
   std::map<ResponseEvent, ResponseListenerInfo> response_listeners_;
   std::map<uint64_t, BlockedRequest> blocked_requests_;
 
-  // Weak-ref, it manages us.
-  raw_ptr<content::BrowserContext> browser_context_;
+  // Pushes which resource types blocking / observing listeners cover to the
+  // session's InterceptState.
+  void UpdateInterceptState();
+
+  struct ObservedRequest;
+  std::map<uint64_t, std::unique_ptr<ObservedRequest>> observed_requests_;
+
+  gin::WeakCellFactory<WebRequest> weak_factory_{this};
 };
 
 }  // namespace electron::api

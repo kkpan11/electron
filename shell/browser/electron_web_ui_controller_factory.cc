@@ -8,6 +8,7 @@
 #include "chrome/common/webui_url_constants.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui_controller.h"
+#include "content/public/common/url_constants.h"
 #include "shell/browser/ui/devtools_ui.h"
 #include "shell/browser/ui/webui/accessibility_ui.h"
 
@@ -25,9 +26,14 @@ ElectronWebUIControllerFactory::~ElectronWebUIControllerFactory() = default;
 content::WebUI::TypeID ElectronWebUIControllerFactory::GetWebUIType(
     content::BrowserContext* browser_context,
     const GURL& url) {
-  if (const std::string_view host = url.host_piece();
-      host == chrome::kChromeUIDevToolsHost ||
-      host == chrome::kChromeUIAccessibilityHost) {
+  const std::string_view host = url.host();
+  if (host == chrome::kChromeUIDevToolsHost &&
+      (url.SchemeIs(content::kChromeDevToolsScheme) ||
+       url.SchemeIs(content::kChromeUIScheme))) {
+    return this;
+  }
+  if (host == chrome::kChromeUIAccessibilityHost &&
+      url.SchemeIs(content::kChromeUIScheme)) {
     return this;
   }
 
@@ -44,7 +50,11 @@ std::unique_ptr<content::WebUIController>
 ElectronWebUIControllerFactory::CreateWebUIControllerForURL(
     content::WebUI* web_ui,
     const GURL& url) {
-  const std::string_view host = url.host_piece();
+  if (GetWebUIType(web_ui->GetWebContents()->GetBrowserContext(), url) ==
+      content::WebUI::kNoWebUI) {
+    return {};
+  }
+  const std::string_view host = url.host();
 
   if (host == chrome::kChromeUIDevToolsHost) {
     auto* browser_context = web_ui->GetWebContents()->GetBrowserContext();

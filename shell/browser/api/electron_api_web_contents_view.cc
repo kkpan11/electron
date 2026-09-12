@@ -4,11 +4,16 @@
 
 #include "shell/browser/api/electron_api_web_contents_view.h"
 
+#include "base/functional/bind.h"
 #include "base/no_destructor.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/timer/elapsed_timer.h"
+#include "content/public/browser/render_frame_host.h"
 #include "gin/data_object_builder.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/native_window.h"
+#include "shell/browser/ui/draggable_region_debugger.h"
 #include "shell/browser/ui/inspectable_web_contents.h"
 #include "shell/browser/ui/inspectable_web_contents_view.h"
 #include "shell/browser/web_contents_preferences.h"
@@ -16,6 +21,7 @@
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/constructor.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/options_switches.h"
@@ -30,11 +36,15 @@
 namespace electron::api {
 
 WebContentsView::WebContentsView(v8::Isolate* isolate,
-                                 gin::Handle<WebContents> web_contents)
+                                 gin_helper::Handle<WebContents> web_contents)
     : View(web_contents->inspectable_web_contents()->GetView()),
       web_contents_(isolate, web_contents.ToV8()),
-      api_web_contents_(web_contents.get()) {
+      api_web_contents_(web_contents->GetWeakPtr()) {
   set_delete_view(false);
+  // See OnContentsBoundsChanging().
+  web_contents->inspectable_web_contents()->GetView()->SetBoundsChangedCallback(
+      base::BindRepeating(&WebContentsView::OnContentsBoundsChanging,
+                          weak_factory_.GetWeakPtr()));
   view()->SetProperty(
       views::kFlexBehaviorKey,
       views::FlexSpecification(views::MinimumFlexSizeRule::kScaleToMinimum,
@@ -43,13 +53,15 @@ WebContentsView::WebContentsView(v8::Isolate* isolate,
 }
 
 WebContentsView::~WebContentsView() {
+  StopObservingWindow();
   if (api_web_contents_)  // destroy() called without closing WebContents
     api_web_contents_->Destroy();
 }
 
-gin::Handle<WebContents> WebContentsView::GetWebContents(v8::Isolate* isolate) {
+gin_helper::Handle<WebContents> WebContentsView::GetWebContents(
+    v8::Isolate* isolate) {
   if (api_web_contents_)
-    return gin::CreateHandle(isolate, api_web_contents_.get());
+    return gin_helper::CreateHandle(isolate, api_web_contents_.get());
   else
     return {};
 }
@@ -81,12 +93,35 @@ void WebContentsView::ApplyBorderRadius() {
 }
 
 int WebContentsView::NonClientHitTest(const gfx::Point& point) {
+  if (!view() || !view()->GetVisible())
+    return HTNOWHERE;
   if (api_web_contents_) {
+    auto* iwc = api_web_contents_->inspectable_web_contents();
+    if (!iwc)
+      return HTNOWHERE;
+    // Convert the point to the contents view's coordinate space rather than
+    // the InspectableWebContentsView's coordinate space, because the draggable
+    // region is relative to the web content area. When DevTools is docked
+    // (e.g. to the left), the contents view is offset within the parent,
+    // so we need to account for that offset.
+    auto* inspectable_view = iwc->GetView();
+    if (!inspectable_view)
+      return HTNOWHERE;
+    auto* contents_view = inspectable_view->GetContentsView();
     gfx::Point local_point(point);
-    views::View::ConvertPointFromWidget(view(), &local_point);
+    views::View::ConvertPointFromWidget(contents_view, &local_point);
     SkRegion* region = api_web_contents_->draggable_region();
-    if (region && region->contains(local_point.x(), local_point.y()))
-      return HTCAPTION;
+    if (region) {
+      auto* debugger = api_web_contents_->draggable_region_debugger();
+      std::optional<base::ElapsedTimer> timer;
+      if (debugger)
+        timer.emplace();
+      const bool hit = region->contains(local_point.x(), local_point.y());
+      if (debugger)
+        debugger->OnHitTest(timer->Elapsed(), hit);
+      if (hit)
+        return HTCAPTION;
+    }
   }
 
   return HTNOWHERE;
@@ -108,11 +143,18 @@ void WebContentsView::OnViewAddedToWidget(views::View* observed_view) {
   // because that's handled in the WebContents dtor called prior.
   api_web_contents_->SetOwnerWindow(native_window);
   native_window->AddDraggableRegionProvider(this);
+  StopObservingWindow();
+  observed_window_ = native_window->GetWeakPtr();
+  native_window->AddObserver(this);
   ApplyBorderRadius();
+  if (HasLivePage())
+    ScheduleWindowControlsOverlayUpdate();
 }
 
 void WebContentsView::OnViewRemovedFromWidget(views::View* observed_view) {
   DCHECK_EQ(observed_view, view());
+
+  StopObservingWindow();
 
   NativeWindow* native_window = NativeWindow::FromWidget(view()->GetWidget());
   if (!native_window)
@@ -121,8 +163,67 @@ void WebContentsView::OnViewRemovedFromWidget(views::View* observed_view) {
   native_window->RemoveDraggableRegionProvider(this);
 }
 
+// Our bounds changed and the RenderWidgetHostView is about to be resized to
+// match. Push the re-clipped overlay rect now so that it rides along with the
+// resize in a single VisualProperties update, rather than trailing it (where it
+// could sit behind the resize's pending ack).
+void WebContentsView::OnContentsBoundsChanging() {
+  if (HasLivePage())
+    SendWindowControlsOverlay();
+}
+
+bool WebContentsView::HasLivePage() {
+  // Before the first navigation there is nothing to update; the window
+  // notifies us again from WebContents::DidFinishNavigation.
+  return observed_window_ && web_contents() &&
+         web_contents()->GetPrimaryMainFrame()->IsRenderFrameLive();
+}
+
+// NativeWindowObserver. This fires from inside the frame view's layout, before
+// the client area (and so this view) has been laid out, so defer until the
+// current layout pass has finished to avoid clipping against stale bounds.
+void WebContentsView::UpdateWindowControlsOverlay(
+    const gfx::Rect& bounding_rect) {
+  ScheduleWindowControlsOverlayUpdate();
+}
+
+void WebContentsView::ScheduleWindowControlsOverlayUpdate() {
+  if (window_controls_overlay_update_pending_)
+    return;
+  window_controls_overlay_update_pending_ = true;
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&WebContentsView::SendWindowControlsOverlay,
+                                weak_factory_.GetWeakPtr()));
+}
+
+// The overlay rect is relative to the window's content area. Translate it
+// into this view's coordinates so that views which only partially cover (or
+// don't cover) the titlebar report the right env(titlebar-area-*) values.
+void WebContentsView::SendWindowControlsOverlay() {
+  window_controls_overlay_update_pending_ = false;
+  if (!api_web_contents_ || !observed_window_)
+    return;
+  const auto bounding_rect = observed_window_->GetWindowControlsOverlayRect();
+  if (!bounding_rect)
+    return;
+  views::View* window_view = observed_window_->GetContentsView();
+  if (!window_view || !window_view->Contains(view()))
+    return;
+
+  gfx::Rect local_rect =
+      views::View::ConvertRectToTarget(window_view, view(), *bounding_rect);
+  local_rect.Intersect(view()->GetLocalBounds());
+  web_contents()->UpdateWindowControlsOverlay(local_rect);
+}
+
+void WebContentsView::StopObservingWindow() {
+  if (observed_window_)
+    observed_window_->RemoveObserver(this);
+  observed_window_ = nullptr;
+}
+
 // static
-gin::Handle<WebContentsView> WebContentsView::Create(
+gin_helper::Handle<WebContentsView> WebContentsView::Create(
     v8::Isolate* isolate,
     const gin_helper::Dictionary& web_preferences) {
   v8::Local<v8::Context> context = isolate->GetCurrentContext();
@@ -133,7 +234,7 @@ gin::Handle<WebContentsView> WebContentsView::Create(
   if (GetConstructor(isolate)
           ->NewInstance(context, 1, &arg)
           .ToLocal(&web_contents_view_obj)) {
-    gin::Handle<WebContentsView> web_contents_view;
+    gin_helper::Handle<WebContentsView> web_contents_view;
     if (gin::ConvertFromV8(isolate, web_contents_view_obj, &web_contents_view))
       return web_contents_view;
   }
@@ -152,36 +253,37 @@ v8::Local<v8::Function> WebContentsView::GetConstructor(v8::Isolate* isolate) {
 }
 
 // static
-gin_helper::WrappableBase* WebContentsView::New(gin_helper::Arguments* args) {
+gin_helper::WrappableBase* WebContentsView::New(gin::Arguments* const args) {
+  v8::Isolate* const isolate = args->isolate();
   gin_helper::Dictionary web_preferences;
   v8::Local<v8::Value> existing_web_contents_value;
   {
     v8::Local<v8::Value> options_value;
     if (args->GetNext(&options_value)) {
       gin_helper::Dictionary options;
-      if (!gin::ConvertFromV8(args->isolate(), options_value, &options)) {
-        args->ThrowError("options must be an object");
+      if (!gin::ConvertFromV8(isolate, options_value, &options)) {
+        args->ThrowTypeError("options must be an object");
         return nullptr;
       }
       v8::Local<v8::Value> web_preferences_value;
       if (options.Get("webPreferences", &web_preferences_value)) {
-        if (!gin::ConvertFromV8(args->isolate(), web_preferences_value,
+        if (!gin::ConvertFromV8(isolate, web_preferences_value,
                                 &web_preferences)) {
-          args->ThrowError("options.webPreferences must be an object");
+          args->ThrowTypeError("options.webPreferences must be an object");
           return nullptr;
         }
       }
 
       if (options.Get("webContents", &existing_web_contents_value)) {
-        gin::Handle<WebContents> existing_web_contents;
-        if (!gin::ConvertFromV8(args->isolate(), existing_web_contents_value,
+        gin_helper::Handle<WebContents> existing_web_contents;
+        if (!gin::ConvertFromV8(isolate, existing_web_contents_value,
                                 &existing_web_contents)) {
-          args->ThrowError("options.webContents must be a WebContents");
+          args->ThrowTypeError("options.webContents must be a WebContents");
           return nullptr;
         }
 
         if (existing_web_contents->owner_window() != nullptr) {
-          args->ThrowError(
+          args->ThrowTypeError(
               "options.webContents is already attached to a window");
           return nullptr;
         }
@@ -190,7 +292,7 @@ gin_helper::WrappableBase* WebContentsView::New(gin_helper::Arguments* args) {
   }
 
   if (web_preferences.IsEmpty())
-    web_preferences = gin_helper::Dictionary::CreateEmpty(args->isolate());
+    web_preferences = gin_helper::Dictionary::CreateEmpty(isolate);
   if (!web_preferences.Has(options::kShow))
     web_preferences.Set(options::kShow, false);
 
@@ -199,10 +301,10 @@ gin_helper::WrappableBase* WebContentsView::New(gin_helper::Arguments* args) {
   }
 
   auto web_contents =
-      WebContents::CreateFromWebPreferences(args->isolate(), web_preferences);
+      WebContents::CreateFromWebPreferences(isolate, web_preferences);
 
   // Constructor call.
-  auto* view = new WebContentsView(args->isolate(), web_contents);
+  auto* view = new WebContentsView{isolate, web_contents};
   view->InitWithArgs(args);
   return view;
 }
@@ -228,8 +330,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.Set("WebContentsView", WebContentsView::GetConstructor(isolate));
 }
 

@@ -4,33 +4,41 @@
 
 #include "shell/browser/api/electron_api_push_notifications.h"
 
-#include "gin/handle.h"
+#include "base/no_destructor.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace electron::api {
 
-PushNotifications* g_push_notifications = nullptr;
+gin::WrapperInfo PushNotifications::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronPushNotifications);
 
-gin::WrapperInfo PushNotifications::kWrapperInfo = {gin::kEmbedderNativeGin};
+PushNotifications::PushNotifications(v8::Isolate* isolate) {
+  gin::PerIsolateData::From(isolate)->AddDisposeObserver(this);
+}
 
-PushNotifications::PushNotifications() = default;
+PushNotifications::~PushNotifications() = default;
 
-PushNotifications::~PushNotifications() {
-  g_push_notifications = nullptr;
+void PushNotifications::OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) {
+  gin::PerIsolateData::From(isolate)->RemoveDisposeObserver(this);
+  apns_promise_set_.clear();
 }
 
 // static
 PushNotifications* PushNotifications::Get() {
-  if (!g_push_notifications)
-    g_push_notifications = new PushNotifications();
-  return g_push_notifications;
-}
-
-// static
-gin::Handle<PushNotifications> PushNotifications::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, PushNotifications::Get());
+  static base::NoDestructor<cppgc::Persistent<PushNotifications>> instance;
+  if (!*instance) {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    *instance = cppgc::MakeGarbageCollected<PushNotifications>(
+        isolate->GetCppHeap()->GetAllocationHandle(), isolate);
+  }
+  return instance->Get();
 }
 
 // static
@@ -48,8 +56,12 @@ gin::ObjectTemplateBuilder PushNotifications::GetObjectTemplateBuilder(
   return builder;
 }
 
-const char* PushNotifications::GetTypeName() {
-  return "PushNotifications";
+const gin::WrapperInfo* PushNotifications::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* PushNotifications::GetHumanReadableName() const {
+  return "Electron / PushNotifications";
 }
 
 }  // namespace electron::api
@@ -60,10 +72,9 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
   gin::Dictionary dict(isolate, exports);
-  dict.Set("pushNotifications",
-           electron::api::PushNotifications::Create(isolate));
+  dict.Set("pushNotifications", electron::api::PushNotifications::Get());
 }
 
 }  // namespace

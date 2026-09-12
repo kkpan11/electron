@@ -49,7 +49,7 @@ describe('shell module', () => {
       }
     });
 
-    async function urlOpened () {
+    async function urlOpened() {
       let url = 'http://127.0.0.1';
       let requestReceived: Promise<any>;
       if (process.platform === 'linux') {
@@ -69,22 +69,27 @@ describe('shell module', () => {
           res.end();
         });
         url = (await listen(server)).url;
-        requestReceived = new Promise<void>(resolve => server.on('connection', () => resolve()));
+        requestReceived = new Promise<void>((resolve) => server.on('connection', () => resolve()));
       }
       return { url, requestReceived };
     }
 
     it('opens an external link', async () => {
       const { url, requestReceived } = await urlOpened();
-      await Promise.all<void>([
-        shell.openExternal(url),
-        requestReceived
-      ]);
+      await Promise.all<void>([shell.openExternal(url), requestReceived]);
+    });
+
+    ifit(process.platform === 'darwin')('throws when there is no application registered to open the URL', async () => {
+      const url = `unknownscheme-${Date.now()}://test`;
+      await expect(shell.openExternal(url)).to.eventually.be.rejectedWith(/No application found to open URL/);
     });
 
     it('opens an external link in the renderer', async () => {
       const { url, requestReceived } = await urlOpened();
-      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: false, contextIsolation: false, nodeIntegration: true } });
+      const w = new BrowserWindow({
+        show: false,
+        webPreferences: { sandbox: false, contextIsolation: false, nodeIntegration: true }
+      });
       await w.loadURL('about:blank');
       await Promise.all<void>([
         w.webContents.executeJavaScript(`require("electron").shell.openExternal(${JSON.stringify(url)})`),
@@ -92,20 +97,20 @@ describe('shell module', () => {
       ]);
     });
 
-    ifit(process.platform === 'darwin')('removes focus from the electron window after opening an external link', async () => {
-      const url = 'http://127.0.0.1';
-      const w = new BrowserWindow({ show: true });
+    ifit(process.platform === 'darwin')(
+      'removes focus from the electron window after opening an external link',
+      async () => {
+        const url = 'http://127.0.0.1';
+        const w = new BrowserWindow({ show: true });
 
-      await once(w, 'focus');
-      expect(w.isFocused()).to.be.true();
+        await once(w, 'focus');
+        expect(w.isFocused()).to.be.true();
 
-      await Promise.all<void>([
-        shell.openExternal(url),
-        once(w, 'blur') as Promise<any>
-      ]);
+        await Promise.all<void>([shell.openExternal(url), once(w, 'blur') as Promise<any>]);
 
-      expect(w.isFocused()).to.be.false();
-    });
+        expect(w.isFocused()).to.be.false();
+      }
+    );
   });
 
   describe('shell.trashItem()', () => {
@@ -124,10 +129,12 @@ describe('shell module', () => {
       await expect(shell.trashItem(filename)).to.eventually.be.rejected();
     });
 
-    ifit(!(process.platform === 'win32' && process.arch === 'ia32'))('works in the renderer process', async () => {
+    it('works in the renderer process', async () => {
       const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
       w.loadURL('about:blank');
-      await expect(w.webContents.executeJavaScript('require(\'electron\').shell.trashItem(\'does-not-exist\')')).to.be.rejectedWith(/does-not-exist|Failed to move item|Failed to create FileOperation/);
+      await expect(
+        w.webContents.executeJavaScript("require('electron').shell.trashItem('does-not-exist')")
+      ).to.be.rejectedWith(/does-not-exist|Failed to move item|Failed to create FileOperation/);
     });
   });
 
@@ -165,6 +172,16 @@ describe('shell module', () => {
     it('writes the shortcut', () => {
       expect(shell.writeShortcutLink(tmpShortcut, { target: 'C:\\' })).to.be.true();
       expect(fs.existsSync(tmpShortcut)).to.be.true();
+    });
+
+    it('writes the shortcut with omitted operation (defaults to create)', () => {
+      expect(shell.writeShortcutLink(tmpShortcut, shortcutOptions)).to.be.true();
+      expect(fs.existsSync(tmpShortcut)).to.be.true();
+      expect(shell.readShortcutLink(tmpShortcut)).to.deep.equal(shortcutOptions);
+
+      const newOptions = { ...shortcutOptions, description: 'new description' };
+      expect(shell.writeShortcutLink(tmpShortcut, newOptions)).to.be.true();
+      expect(shell.readShortcutLink(tmpShortcut)).to.deep.equal(newOptions);
     });
 
     it('correctly sets the fields', () => {

@@ -8,10 +8,10 @@ respond to the first mouse click in their window, which is desirable for some
 kinds of utility windows. Similarly for `disableAutoHideCursor`.
 
 diff --git a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
-index a606a4870bd3f504c4bd6316aa3ab833621ab205..f97ab6bdafbc35216b1935cf979443d071dd889f 100644
+index e16496bf8f63907101542120f9dfdd6b2d07d782..a220b3a2fcc0f197cabc7018f45256b401b41131 100644
 --- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
 +++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
-@@ -171,6 +171,15 @@ void ExtractUnderlines(NSAttributedString* string,
+@@ -191,6 +191,11 @@ void ExtractUnderlines(NSAttributedString* string,
  
  }  // namespace
  
@@ -20,35 +20,21 @@ index a606a4870bd3f504c4bd6316aa3ab833621ab205..f97ab6bdafbc35216b1935cf979443d0
 +- (BOOL)disableAutoHideCursor;
 +@end
 +
-+@interface NSView (ElectronCustomMethods)
-+- (BOOL)shouldIgnoreMouseEvent;
-+@end
-+
  // RenderWidgetHostViewCocoa ---------------------------------------------------
  
  // Private methods:
-@@ -782,6 +791,9 @@ - (AcceptMouseEventsOption)acceptsMouseEventsOption {
+@@ -852,6 +857,10 @@ - (AcceptMouseEvents)acceptsMouseEventsOption {
  }
  
  - (BOOL)acceptsFirstMouse:(NSEvent*)theEvent {
 +  if ([self.window respondsToSelector:@selector(acceptsFirstMouse)] &&
 +      [self.window acceptsFirstMouse])
 +    return YES;
-   // Enable "click-through" if mouse clicks are accepted in inactive windows
-   return [self acceptsMouseEventsOption] > kAcceptMouseEventsInActiveWindow;
- }
-@@ -927,6 +939,10 @@ - (BOOL)shouldIgnoreMouseEvent:(NSEvent*)theEvent {
-   // its parent view.
-   BOOL hitSelf = NO;
-   while (view) {
-+    if ([view respondsToSelector:@selector(shouldIgnoreMouseEvent)] && ![view shouldIgnoreMouseEvent]) {
-+      return NO;
-+    }
 +
-     if (view == self)
-       hitSelf = YES;
-     if ([view isKindOfClass:[self class]] && ![view isEqual:self] &&
-@@ -1261,6 +1277,10 @@ - (void)keyEvent:(NSEvent*)theEvent wasKeyEquivalent:(BOOL)equiv {
+   // Enable "click-through" if mouse clicks are accepted in inactive windows.
+   return
+       [self acceptsMouseEventsOption] > AcceptMouseEvents::kWhenInActiveWindow;
+@@ -1477,6 +1486,10 @@ - (void)keyEvent:(NSEvent*)theEvent wasKeyEquivalent:(BOOL)equiv {
                                eventType == NSEventTypeKeyDown &&
                                !(modifierFlags & NSEventModifierFlagCommand);
  

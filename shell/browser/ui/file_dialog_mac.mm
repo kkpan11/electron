@@ -11,17 +11,16 @@
 
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "base/apple/foundation_util.h"
 #include "base/apple/scoped_cftyperef.h"
 #include "base/files/file_util.h"
 #include "base/mac/mac_util.h"
 #include "base/strings/sys_string_conversions.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "electron/mas.h"
 #include "shell/browser/native_window.h"
+#include "shell/common/electron_paths.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
@@ -29,8 +28,8 @@
 
 @interface PopUpButtonHandler : NSObject
 
-@property(nonatomic, assign) NSSavePanel* savePanel;
-@property(nonatomic, strong) NSArray* contentTypesList;
+@property(nonatomic, weak) NSSavePanel* savePanel;
+@property(nonatomic, strong) NSArray* fileTypesList;
 
 - (instancetype)initWithPanel:(NSSavePanel*)panel
                  andTypesList:(NSArray*)typesList;
@@ -41,14 +40,14 @@
 @implementation PopUpButtonHandler
 
 @synthesize savePanel;
-@synthesize contentTypesList;
+@synthesize fileTypesList;
 
 - (instancetype)initWithPanel:(NSSavePanel*)panel
                  andTypesList:(NSArray*)typesList {
   self = [super init];
   if (self) {
     [self setSavePanel:panel];
-    [self setContentTypesList:typesList];
+    [self setFileTypesList:typesList];
   }
   return self;
 }
@@ -56,19 +55,17 @@
 - (void)selectFormat:(id)sender {
   NSPopUpButton* button = (NSPopUpButton*)sender;
   NSInteger selectedItemIndex = [button indexOfSelectedItem];
-  NSArray* list = [self contentTypesList];
-  NSArray* content_types = [list objectAtIndex:selectedItemIndex];
+  NSArray* list = [self fileTypesList];
+  NSArray* fileTypes = [list objectAtIndex:selectedItemIndex];
 
-  __block BOOL allowAllFiles = NO;
-  [content_types
-      enumerateObjectsUsingBlock:^(UTType* type, NSUInteger idx, BOOL* stop) {
-        if ([[type preferredFilenameExtension] isEqual:@"*"]) {
-          allowAllFiles = YES;
-          *stop = YES;
-        }
-      }];
-
-  [[self savePanel] setAllowedContentTypes:allowAllFiles ? @[] : content_types];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  // If we meet a '*' file extension, we allow all file types.
+  if ([fileTypes count] == 0 || [fileTypes containsObject:@"*"])
+    [[self savePanel] setAllowedFileTypes:nil];
+  else
+    [[self savePanel] setAllowedFileTypes:fileTypes];
+#pragma clang diagnostic pop
 }
 
 @end
@@ -105,7 +102,7 @@ void SetAllowedFileTypes(NSSavePanel* dialog, const Filters& filters) {
 
   // Create array to keep file types and their name.
   for (const Filter& filter : filters) {
-    NSMutableOrderedSet* content_types_set =
+    NSMutableOrderedSet* file_type_set =
         [NSMutableOrderedSet orderedSetWithCapacity:filters.size()];
     [filter_names addObject:@(filter.first.c_str())];
 
@@ -119,34 +116,30 @@ void SetAllowedFileTypes(NSSavePanel* dialog, const Filters& filters) {
         ext.erase(0, pos + 1);
       }
 
-      if (ext == "*") {
-        [content_types_set addObject:[UTType typeWithFilenameExtension:@"*"]];
-        break;
-      } else {
-        if (UTType* utt = [UTType typeWithFilenameExtension:@(ext.c_str())])
-          [content_types_set addObject:utt];
-      }
+      [file_type_set addObject:@(ext.c_str())];
     }
 
-    [file_types_list addObject:content_types_set];
+    [file_types_list addObject:[file_type_set array]];
   }
 
-  // Don't add file format picker.
-  if ([file_types_list count] <= 1)
-    return;
+  // Passing empty array to setAllowedFileTypes will cause exception.
+  NSArray* file_types = nil;
+  NSUInteger count = [file_types_list count];
+  if (count > 0) {
+    file_types = [[file_types_list objectAtIndex:0] allObjects];
+    // If we meet a '*' file extension, we allow all the file types and no
+    // need to set the specified file types.
+    if ([file_types count] == 0 || [file_types containsObject:@"*"])
+      file_types = nil;
+  }
 
-  NSArray* content_types = [file_types_list objectAtIndex:0];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  [dialog setAllowedFileTypes:file_types];
+#pragma clang diagnostic pop
 
-  __block BOOL allowAllFiles = NO;
-  [content_types
-      enumerateObjectsUsingBlock:^(UTType* type, NSUInteger idx, BOOL* stop) {
-        if ([[type preferredFilenameExtension] isEqual:@"*"]) {
-          allowAllFiles = YES;
-          *stop = YES;
-        }
-      }];
-
-  [dialog setAllowedContentTypes:allowAllFiles ? @[] : content_types];
+  if (count <= 1)
+    return;  // don't add file format picker
 
   // Add file format picker.
   ElectronAccessoryView* accessoryView = [[ElectronAccessoryView alloc]
@@ -193,14 +186,18 @@ void SetupDialog(NSSavePanel* dialog, const DialogSettings& settings) {
 
   [dialog setShowsTagField:settings.shows_tag_field];
 
+  base::FilePath default_path = settings.default_path.empty()
+                                    ? electron::GetDefaultPath()
+                                    : settings.default_path;
+
   NSString* default_dir = nil;
   NSString* default_filename = nil;
-  if (!settings.default_path.empty()) {
+  if (!default_path.empty()) {
     electron::ScopedAllowBlockingForElectron allow_blocking;
-    if (base::DirectoryExists(settings.default_path)) {
-      default_dir = base::SysUTF8ToNSString(settings.default_path.value());
+    if (base::DirectoryExists(default_path)) {
+      default_dir = base::SysUTF8ToNSString(default_path.value());
     } else {
-      if (settings.default_path.IsAbsolute()) {
+      if (default_path.IsAbsolute()) {
         default_dir =
             base::SysUTF8ToNSString(settings.default_path.DirName().value());
       }
@@ -276,10 +273,14 @@ int RunModalDialog(NSSavePanel* dialog, const DialogSettings& settings) {
 
 // Create bookmark data and serialise it into a base64 string.
 std::string GetBookmarkDataFromNSURL(NSURL* url) {
+  NSString* path = [url path];
+  if (!path)
+    return "";
+
   // Create the file if it doesn't exist (necessary for NSSavePanel options).
   NSFileManager* defaultManager = [NSFileManager defaultManager];
-  if (![defaultManager fileExistsAtPath:[url path]]) {
-    [defaultManager createFileAtPath:[url path] contents:nil attributes:nil];
+  if (![defaultManager fileExistsAtPath:path]) {
+    [defaultManager createFileAtPath:path contents:nil attributes:nil];
   }
 
   NSError* error = nil;
@@ -309,6 +310,8 @@ void ReadDialogPathsWithBookmarks(NSOpenPanel* dialog,
       continue;
 
     NSString* path = [url path];
+    if (!path)
+      continue;
 
     // There's a bug in macOS where despite a request to disallow file
     // selection, files/packages can be selected. If file selection
@@ -318,9 +321,10 @@ void ReadDialogPathsWithBookmarks(NSOpenPanel* dialog,
       BOOL exists =
           [[NSFileManager defaultManager] fileExistsAtPath:path
                                                isDirectory:&is_directory];
-      BOOL is_package =
-          [[NSWorkspace sharedWorkspace] isFilePackageAtPath:path];
-      if (!exists || !is_directory || is_package)
+      BOOL is_package_as_directory =
+          [[NSWorkspace sharedWorkspace] isFilePackageAtPath:path] &&
+          [dialog treatsFilePackagesAsDirectories];
+      if (!exists || !(is_directory || is_package_as_directory))
         continue;
     }
 
@@ -435,19 +439,18 @@ void ShowOpenDialog(const DialogSettings& settings,
   }
 }
 
-bool ShowSaveDialogSync(const DialogSettings& settings, base::FilePath* path) {
-  DCHECK(path);
+std::optional<base::FilePath> ShowSaveDialogSync(
+    const DialogSettings& settings) {
   NSSavePanel* dialog = [NSSavePanel savePanel];
 
   SetupDialog(dialog, settings);
   SetupSaveDialogForProperties(dialog, settings.properties);
 
-  int chosen = RunModalDialog(dialog, settings);
+  const int chosen = RunModalDialog(dialog, settings);
   if (chosen == NSModalResponseCancel || ![[dialog URL] isFileURL])
-    return false;
+    return {};
 
-  *path = base::FilePath(base::SysNSStringToUTF8([[dialog URL] path]));
-  return true;
+  return base::FilePath{base::SysNSStringToUTF8([[dialog URL] path])};
 }
 
 void SaveDialogCompletion(int chosen,

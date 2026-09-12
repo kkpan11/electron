@@ -25,13 +25,48 @@ Menu.prototype._isCommandIdChecked = function (id) {
 };
 
 Menu.prototype._isCommandIdEnabled = function (id) {
-  return this.commandsMap[id] ? this.commandsMap[id].enabled : false;
+  const item = this.commandsMap[id];
+  if (!item) return false;
+
+  const focusedWindow = BaseWindow.getFocusedWindow();
+
+  if (item.role === 'minimize' && focusedWindow) {
+    return focusedWindow.isMinimizable();
+  }
+
+  if (item.role === 'togglefullscreen' && focusedWindow) {
+    return focusedWindow.isFullScreenable();
+  }
+
+  if (item.role === 'close' && focusedWindow) {
+    return focusedWindow.isClosable();
+  }
+
+  return item.enabled;
 };
+
 Menu.prototype._shouldCommandIdWorkWhenHidden = function (id) {
-  return this.commandsMap[id] ? !!this.commandsMap[id].acceleratorWorksWhenHidden : false;
+  return this.commandsMap[id]?.acceleratorWorksWhenHidden ?? false;
 };
+
 Menu.prototype._isCommandIdVisible = function (id) {
-  return this.commandsMap[id] ? this.commandsMap[id].visible : false;
+  return this.commandsMap[id]?.visible ?? false;
+};
+
+Menu.prototype._getLabelForCommandId = function (id) {
+  return this.commandsMap[id]?.label ?? '';
+};
+
+Menu.prototype._getAccessibilityLabelForCommandId = function (id) {
+  return this.commandsMap[id]?.accessibilityLabel ?? '';
+};
+
+Menu.prototype._getSecondaryLabelForCommandId = function (id) {
+  return this.commandsMap[id]?.sublabel ?? '';
+};
+
+Menu.prototype._getIconForCommandId = function (id) {
+  return this.commandsMap[id]?.icon ?? null;
 };
 
 Menu.prototype._getAcceleratorForCommandId = function (id, useDefaultAccelerator) {
@@ -42,12 +77,12 @@ Menu.prototype._getAcceleratorForCommandId = function (id, useDefaultAccelerator
 };
 
 Menu.prototype._shouldRegisterAcceleratorForCommandId = function (id) {
-  return this.commandsMap[id] ? this.commandsMap[id].registerAccelerator : false;
+  return this.commandsMap[id]?.registerAccelerator ?? false;
 };
 
 if (process.platform === 'darwin') {
   Menu.prototype._getSharingItemForCommandId = function (id) {
-    return this.commandsMap[id] ? this.commandsMap[id].sharingItem : null;
+    return this.commandsMap[id]?.sharingItem ?? null;
   };
 }
 
@@ -61,7 +96,7 @@ Menu.prototype._executeCommand = function (event, id) {
 Menu.prototype._menuWillShow = function () {
   // Ensure radio groups have at least one menu item selected
   for (const id of Object.keys(this.groupsMap)) {
-    const found = this.groupsMap[id].find(item => item.checked) || null;
+    const found = this.groupsMap[id].find((item) => item.checked) || null;
     if (!found) checked.set(this.groupsMap[id][0], true);
   }
 };
@@ -110,7 +145,7 @@ Menu.prototype.closePopup = function (window) {
 Menu.prototype.getMenuItemById = function (id) {
   const items = this.items;
 
-  let found = items.find(item => item.id === id) || null;
+  let found = items.find((item) => item.id === id) || null;
   for (let i = 0; !found && i < items.length; i++) {
     const { submenu } = items[i];
     if (submenu) {
@@ -138,18 +173,23 @@ Menu.prototype.insert = function (pos, item) {
   // insert item depending on its type
   insertItemByType.call(this, item, pos);
 
-  // set item properties
-  if (item.sublabel) this.setSublabel(pos, item.sublabel);
-  if (item.toolTip) this.setToolTip(pos, item.toolTip);
-  if (item.icon) this.setIcon(pos, item.icon);
-  if (item.role) this.setRole(pos, item.role);
-
   // Make menu accessible to items.
   item.overrideReadOnlyProperty('menu', this);
 
-  // Remember the items.
+  // Remember the item before the setters below, which can throw.
   this.items.splice(pos, 0, item);
   this.commandsMap[item.commandId] = item;
+
+  // set item properties
+  if (item.toolTip) this.setToolTip(pos, item.toolTip);
+  if (item.icon) this.setIcon(pos, item.icon);
+  if (item.role) this.setRole(pos, item.role);
+  if (item.type === 'palette' || item.type === 'header') {
+    this.setCustomType(pos, item.type);
+  }
+  if (process.platform === 'darwin' && item.badge) {
+    this.setBadge(pos, item.badge);
+  }
 };
 
 Menu.prototype._callMenuWillShow = function () {
@@ -180,7 +220,7 @@ Menu.setApplicationMenu = function (menu: MenuType) {
     bindings.setApplicationMenu(menu);
   } else {
     const windows = BaseWindow.getAllWindows();
-    windows.map(w => w.setMenu(menu));
+    windows.map((w) => w.setMenu(menu));
   }
 };
 
@@ -211,14 +251,16 @@ Menu.buildFromTemplate = function (template) {
 /* Helper Functions */
 
 // validate the template against having the wrong attribute
-function areValidTemplateItems (template: (MenuItemConstructorOptions | MenuItem)[]) {
-  return template.every(item =>
-    item != null &&
-    typeof item === 'object' &&
-    (Object.hasOwn(item, 'label') || Object.hasOwn(item, 'role') || item.type === 'separator'));
+function areValidTemplateItems(template: (MenuItemConstructorOptions | MenuItem)[]) {
+  return template.every(
+    (item) =>
+      item != null &&
+      typeof item === 'object' &&
+      (Object.hasOwn(item, 'label') || Object.hasOwn(item, 'role') || item.type === 'separator')
+  );
 }
 
-function sortTemplate (template: (MenuItemConstructorOptions | MenuItem)[]) {
+function sortTemplate(template: (MenuItemConstructorOptions | MenuItem)[]) {
   const sorted = sortMenuItems(template);
   for (const item of sorted) {
     if (Array.isArray(item.submenu)) {
@@ -229,7 +271,7 @@ function sortTemplate (template: (MenuItemConstructorOptions | MenuItem)[]) {
 }
 
 // Search between separators to find a radio menu item and return its group id
-function generateGroupId (items: (MenuItemConstructorOptions | MenuItem)[], pos: number) {
+function generateGroupId(items: (MenuItemConstructorOptions | MenuItem)[], pos: number) {
   if (pos > 0) {
     for (let idx = pos - 1; idx >= 0; idx--) {
       if (items[idx].type === 'radio') return (items[idx] as MenuItem).groupId;
@@ -245,7 +287,7 @@ function generateGroupId (items: (MenuItemConstructorOptions | MenuItem)[], pos:
   return groupIdIndex;
 }
 
-function removeExtraSeparators (items: (MenuItemConstructorOptions | MenuItem)[]) {
+function removeExtraSeparators(items: (MenuItemConstructorOptions | MenuItem)[]) {
   // fold adjacent separators together
   let ret = items.filter((e, idx, arr) => {
     if (e.visible === false) return true;
@@ -261,12 +303,14 @@ function removeExtraSeparators (items: (MenuItemConstructorOptions | MenuItem)[]
   return ret;
 }
 
-function insertItemByType (this: MenuType, item: MenuItem, pos: number) {
+function insertItemByType(this: MenuType, item: MenuItem, pos: number) {
   const types = {
     normal: () => this.insertItem(pos, item.commandId, item.label),
+    header: () => this.insertItem(pos, item.commandId, item.label),
     checkbox: () => this.insertCheckItem(pos, item.commandId, item.label),
     separator: () => this.insertSeparator(pos),
     submenu: () => this.insertSubMenu(pos, item.commandId, item.label, item.submenu),
+    palette: () => this.insertSubMenu(pos, item.commandId, item.label, item.submenu),
     radio: () => {
       // Grouping radio menu items
       item.overrideReadOnlyProperty('groupId', generateGroupId(this.items, pos));

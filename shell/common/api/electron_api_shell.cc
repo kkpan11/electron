@@ -4,7 +4,6 @@
 
 #include <string>
 
-#include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/guid_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
@@ -55,7 +54,8 @@ void OnOpenFinished(gin_helper::Promise<void> promise,
     promise.RejectWithErrorMessage(error);
 }
 
-v8::Local<v8::Promise> OpenExternal(const GURL& url, gin::Arguments* args) {
+v8::Local<v8::Promise> OpenExternal(const GURL& url,
+                                    gin::Arguments* const args) {
   gin_helper::Promise<void> promise(args->isolate());
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
@@ -108,14 +108,23 @@ v8::Local<v8::Promise> TrashItem(v8::Isolate* isolate,
 #if BUILDFLAG(IS_WIN)
 
 bool WriteShortcutLink(const base::FilePath& shortcut_path,
-                       gin_helper::Arguments* args) {
+                       gin::Arguments* const args) {
   base::win::ShortcutOperation operation =
       base::win::ShortcutOperation::kCreateAlways;
-  args->GetNext(&operation);
-  auto options = gin::Dictionary::CreateEmpty(args->isolate());
-  if (!args->GetNext(&options)) {
-    args->ThrowError();
-    return false;
+  gin::Dictionary options = gin::Dictionary::CreateEmpty(args->isolate());
+
+  v8::Local<v8::Value> peek = args->PeekNext();
+  if (peek->IsObject()) {
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
+  } else {
+    args->GetNext(&operation);
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
   }
 
   base::win::ShortcutProperties properties;
@@ -173,7 +182,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  gin_helper::Dictionary dict{isolate, exports};
   dict.SetMethod("showItemInFolder", &platform_util::ShowItemInFolder);
   dict.SetMethod("openPath", &OpenPath);
   dict.SetMethod("openExternal", &OpenExternal);

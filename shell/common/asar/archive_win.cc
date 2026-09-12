@@ -26,13 +26,13 @@ const wchar_t kIntegrityCheckResourceType[] = L"Integrity";
 const wchar_t kIntegrityCheckResourceItem[] = L"ElectronAsar";
 
 std::optional<base::FilePath> Archive::RelativePath() const {
-  base::FilePath exe_path;
-  if (!base::PathService::Get(base::FILE_EXE, &exe_path)) {
-    LOG(FATAL) << "Couldn't get exe file path";
+  base::FilePath assets_dir;
+  if (!base::PathService::Get(base::DIR_ASSETS, &assets_dir)) {
+    LOG(FATAL) << "Couldn't get assets directory path";
   }
 
   base::FilePath relative_path;
-  if (!exe_path.DirName().AppendRelativePath(path_, &relative_path)) {
+  if (!assets_dir.AppendRelativePath(path_, &relative_path)) {
     return std::nullopt;
   }
 
@@ -45,7 +45,7 @@ auto LoadIntegrityConfig() {
   absl::flat_hash_map<std::string, IntegrityPayload> cache;
 
   // Load integrity config from exe resource
-  HMODULE module_handle = ::GetModuleHandle(NULL);
+  HMODULE module_handle = ::GetModuleHandle(nullptr);
 
   HRSRC resource = ::FindResource(module_handle, kIntegrityCheckResourceItem,
                                   kIntegrityCheckResourceType);
@@ -71,13 +71,14 @@ auto LoadIntegrityConfig() {
 
   // Parse integrity config payload
   std::optional<base::Value> root =
-      base::JSONReader::Read(std::string_view{res_data, res_size});
+      base::JSONReader::Read(std::string_view{res_data, res_size},
+                             base::JSON_PARSE_CHROMIUM_EXTENSIONS);
 
   if (!root.has_value()) {
     LOG(FATAL) << "Invalid integrity config: NOT a valid JSON.";
   }
 
-  const base::Value::List* file_configs = root.value().GetIfList();
+  const base::ListValue* file_configs = root.value().GetIfList();
   if (!file_configs) {
     LOG(FATAL) << "Invalid integrity config: NOT a list.";
   }
@@ -86,7 +87,7 @@ auto LoadIntegrityConfig() {
   cache.reserve(file_configs->size());
   for (size_t i = 0; i < file_configs->size(); i++) {
     // Skip invalid file configs
-    const base::Value::Dict* ele_dict = (*file_configs)[i].GetIfDict();
+    const base::DictValue* ele_dict = (*file_configs)[i].GetIfDict();
     if (!ele_dict) {
       LOG(WARNING) << "Skip config " << i << ": NOT a valid dict";
       continue;

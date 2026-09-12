@@ -26,6 +26,8 @@ inline constexpr std::string_view kMinWidth = "minWidth";
 inline constexpr std::string_view kMinHeight = "minHeight";
 inline constexpr std::string_view kMaxWidth = "maxWidth";
 inline constexpr std::string_view kMaxHeight = "maxHeight";
+inline constexpr std::string_view kinnerWidth = "innerWidth";
+inline constexpr std::string_view kinnerHeight = "innerHeight";
 inline constexpr std::string_view kResizable = "resizable";
 inline constexpr std::string_view kMovable = "movable";
 inline constexpr std::string_view kMinimizable = "minimizable";
@@ -105,6 +107,19 @@ inline constexpr std::string_view kFocusable = "focusable";
 // The WebPreferences.
 inline constexpr std::string_view kWebPreferences = "webPreferences";
 
+// Window state persistence for BaseWindow
+inline constexpr std::string_view kWindowStatePersistence =
+    "windowStatePersistence";
+
+// Identifier for the window provided by the application
+inline constexpr std::string_view kName = "name";
+
+// Whether to save the window bounds
+inline constexpr std::string_view kBounds = "bounds";
+
+// Whether to save the window display mode
+inline constexpr std::string_view kDisplayMode = "displayMode";
+
 // Add a vibrancy effect to the browser window
 inline constexpr std::string_view kVibrancyType = "vibrancy";
 
@@ -121,6 +136,8 @@ inline constexpr std::string_view kRoundedCorners = "roundedCorners";
 
 inline constexpr std::string_view ktitleBarOverlay = "titleBarOverlay";
 
+inline constexpr std::string_view kAccentColor = "accentColor";
+
 // The color to use as the theme and symbol colors respectively for Window
 // Controls Overlay if enabled on Windows.
 inline constexpr std::string_view kOverlayButtonColor = "color";
@@ -133,6 +150,9 @@ inline constexpr std::string_view kOverlayHeight = "height";
 
 // The factor of which page should be zoomed.
 inline constexpr std::string_view kZoomFactor = "zoomFactor";
+
+// The zoom mode for the web contents.
+inline constexpr std::string_view kZoomMode = "zoomMode";
 
 // Script that will be loaded by guest WebContents before other scripts.
 inline constexpr std::string_view kPreloadScript = "preload";
@@ -179,6 +199,11 @@ inline constexpr std::string_view kOffscreen = "offscreen";
 
 inline constexpr std::string_view kUseSharedTexture = "useSharedTexture";
 
+inline constexpr std::string_view kSharedTexturePixelFormat =
+    "sharedTexturePixelFormat";
+
+inline constexpr std::string_view kDeviceScaleFactor = "deviceScaleFactor";
+
 inline constexpr std::string_view kNodeIntegrationInSubFrames =
     "nodeIntegrationInSubFrames";
 
@@ -215,9 +240,14 @@ inline constexpr std::string_view kSpellcheck = "spellcheck";
 inline constexpr std::string_view kEnableDeprecatedPaste =
     "enableDeprecatedPaste";
 
-// Whether the -electron-corner-smoothing CSS rule is enabled.
-inline constexpr std::string_view kEnableCornerSmoothingCSS =
-    "enableCornerSmoothingCSS";
+// Whether to focus the webContents on navigation.
+inline constexpr std::string_view kFocusOnNavigation = "focusOnNavigation";
+
+// Whether to disable the wake lock for this WebContents
+inline constexpr std::string_view kDisableWakeLocks = "disableWakeLocks";
+
+inline constexpr std::string_view kModal = "modal";
+
 }  // namespace options
 
 // Following are actually command line switches, should be moved to other files.
@@ -259,6 +289,9 @@ inline constexpr base::cstring_view kStreamingSchemes = "streaming-schemes";
 // Register schemes as supporting V8 code cache.
 inline constexpr base::cstring_view kCodeCacheSchemes = "code-cache-schemes";
 
+// Register schemes as supporting extensions.
+inline constexpr base::cstring_view kExtensionSchemes = "extension-schemes";
+
 // The browser process app model ID
 inline constexpr base::cstring_view kAppUserModelId = "app-user-model-id";
 
@@ -267,10 +300,6 @@ inline constexpr base::cstring_view kAppPath = "app-path";
 
 // The command line switch versions of the options.
 inline constexpr base::cstring_view kScrollBounce = "scroll-bounce";
-
-// Command switch passed to renderer process to control nodeIntegration.
-inline constexpr base::cstring_view kNodeIntegrationInWorker =
-    "node-integration-in-worker";
 
 // Widevine options
 // Path to Widevine CDM binaries.
@@ -301,9 +330,9 @@ inline constexpr base::cstring_view kEnableAuthNegotiatePort =
 // If set, NTLM v2 is disabled for POSIX platforms.
 inline constexpr base::cstring_view kDisableNTLMv2 = "disable-ntlm-v2";
 
-// Indicates that preloads for service workers are registered.
-inline constexpr base::cstring_view kServiceWorkerPreload =
-    "service-worker-preload";
+// If set, flag node::ProcessInitializationFlags::kNoStdioInitialization would
+// be set for node initialization.
+inline constexpr base::cstring_view kNoStdioInit = "no-stdio-init";
 
 }  // namespace switches
 
